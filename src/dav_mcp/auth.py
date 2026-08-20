@@ -56,12 +56,14 @@ from fastmcp.server.auth.auth import (
 
 logger = logging.getLogger(__name__)
 
-# Deliberately still "calendar:manage" after the rename to dav-mcp. The scope
-# is baked into every issued token and into each client's registration, so
-# changing it invalidates them and forces every connector to be added again.
-# It is server-internal and never shown to anyone, so the accuracy is not worth
-# the re-authorization.
-SCOPE = "calendar:manage"
+# Server-internal and never displayed, but it names what the server actually
+# grants access to -- calendars and contacts both -- so it follows the rename.
+#
+# Changing it is not free: the scope is embedded in every issued token and in
+# each client's registration, and `required_scopes` rejects a token that does
+# not carry it. Every client therefore has to authorize again. Do not change
+# this casually.
+SCOPE = "dav:manage"
 
 AUTH_CODE_TTL_SECONDS = 5 * 60
 ACCESS_TOKEN_TTL_SECONDS = 60 * 60

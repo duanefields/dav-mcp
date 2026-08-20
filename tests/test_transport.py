@@ -174,3 +174,24 @@ class TestHealth:
             server._last_write.update(
                 {"at": None, "ok": None, "error": None, "action": None}
             )
+
+
+class TestScope:
+    """The OAuth scope is embedded in every issued token and registration.
+
+    Changing it invalidates both and forces every client to authorize again, so
+    it is pinned here to make that a deliberate act rather than a side effect.
+    """
+
+    def test_the_scope_names_the_server_not_one_of_its_protocols(self):
+        from dav_mcp.auth import SCOPE
+
+        assert SCOPE == "dav:manage"
+
+    def test_discovery_advertises_exactly_that_scope(self, monkeypatch):
+        from dav_mcp.auth import SCOPE, PasswordOAuthProvider
+
+        provider = PasswordOAuthProvider(
+            password="x", base_url="https://dav.example.com", state_path=None
+        )
+        assert provider.required_scopes == [SCOPE]
