@@ -56,6 +56,11 @@ from fastmcp.server.auth.auth import (
 
 logger = logging.getLogger(__name__)
 
+# Deliberately still "calendar:manage" after the rename to dav-mcp. The scope
+# is baked into every issued token and into each client's registration, so
+# changing it invalidates them and forces every connector to be added again.
+# It is server-internal and never shown to anyone, so the accuracy is not worth
+# the re-authorization.
 SCOPE = "calendar:manage"
 
 AUTH_CODE_TTL_SECONDS = 5 * 60
@@ -446,7 +451,7 @@ def _login_page(*, txn: str, error: str | None = None) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Sign in - Calendar MCP</title>
+<title>Sign in - DAV MCP</title>
 <style>
   :root {{ color-scheme: light dark; }}
   body {{
@@ -488,7 +493,7 @@ def _login_page(*, txn: str, error: str | None = None) -> str:
 </head>
 <body>
   <main>
-    <h1>Calendar MCP</h1>
+    <h1>DAV MCP</h1>
     <p class="sub">Enter the server password to authorize this client.</p>
     {banner}{form}
   </main>
