@@ -1,0 +1,16 @@
+# Credentials and anything describing a specific deployment.
+.env
+docs/remote-hosting.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.DS_Store

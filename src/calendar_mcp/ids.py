@@ -1,0 +1,70 @@
+"""Opaque, stateless event ids.
+
+An id has to survive a round trip through a model and come back naming exactly
+one occurrence of one resource on one calendar. It encodes the calendar id, the
+resource name and an optional recurrence key, so nothing needs to be stored
+server-side -- there is no database and no id table to fall out of sync with the
+calendar.
+
+The three parts are joined with US (0x1f) rather than a printable separator.
+Resource names are not tame: anything imported from Google is named
+``<uid>@google.com.ics``, and a "/" or "@" separator splits such a name in the
+middle. A control character cannot occur in either a resource name or a
+recurrence key, so the split is unambiguous by construction.
+
+The encoding is base64url purely so the result survives being quoted, pasted and
+JSON-encoded without a slash or a dot causing trouble. It is not a secret.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+
+
+class BadEventId(ValueError):
+    """The id was not produced by this server."""
+
+
+SEP = "\x1f"
+
+_MESSAGE = (
+    "is not a valid event id. Event ids come from search_events; pass one "
+    "through unchanged rather than composing it by hand."
+)
+
+
+def encode(calendar_id: str, resource_name: str, recurrence_id: str = "") -> str:
+    if not calendar_id or not resource_name:
+        raise ValueError("calendar_id and resource_name are both required")
+    parts = [calendar_id, resource_name]
+    if recurrence_id:
+        parts.append(recurrence_id)
+    raw = SEP.join(parts)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode(event_id: str) -> tuple[str, str, str]:
+    """Return ``(calendar_id, resource_name, recurrence_id)``.
+
+    ``recurrence_id`` is an empty string for a non-recurring event or for the
+    master of a series.
+    """
+    if not event_id or not event_id.strip():
+        raise BadEventId(f"An empty event id {_MESSAGE}")
+
+    text = event_id.strip()
+    padding = "=" * (-len(text) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(text + padding).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise BadEventId(f"{event_id!r} {_MESSAGE}") from None
+
+    parts = raw.split(SEP)
+    if len(parts) == 2:
+        parts.append("")
+    if len(parts) != 3 or not parts[0] or not parts[1]:
+        raise BadEventId(f"{event_id!r} {_MESSAGE}")
+
+    calendar_id, resource_name, recurrence_id = parts
+    return calendar_id, resource_name, recurrence_id
