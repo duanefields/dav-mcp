@@ -67,6 +67,9 @@ def caldav():
     fake.calendar = AsyncMock(return_value=PERSONAL)
     fake.default_calendar = AsyncMock(return_value=PERSONAL)
     fake.query = AsyncMock(return_value=[])
+    fake.identities = AsyncMock(
+        return_value=("mailto:me@example.com", "mailto:me@example.net")
+    )
     fake.put = AsyncMock(return_value='"new-etag"')
     fake.delete = AsyncMock(return_value=None)
     with patch.object(server, "client", return_value=fake):
@@ -363,3 +366,275 @@ class TestFormatting:
         )
         assert len(text) < 600
         assert "..." in text
+
+
+# ----------------------------------------------------------------------
+# Scheduling
+#
+# iCloud sends the iMIP mail itself, so every one of these paths puts real
+# email in a real stranger's inbox. The assertion that matters most in this
+# section is `put.assert_not_awaited()`: a rejected argument must send nothing
+# at all, because a half-sent invitation cannot be recalled.
+# ----------------------------------------------------------------------
+
+
+def body_of(caldav):
+    return caldav.put.await_args.args[2]
+
+
+class TestCreateWithParticipants:
+    async def test_invites_produce_an_organizer_and_attendees(self, caldav):
+        await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[{"name": "Jo", "email": "jo@example.org"}],
+        )
+        body = body_of(caldav)
+        assert "ORGANIZER" in body and "me@example.com" in body
+        assert "ATTENDEE" in body and "jo@example.org" in body
+
+    async def test_the_organizer_appears_on_their_own_guest_list_as_accepted(self, caldav):
+        result = await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[{"name": "Jo", "email": "jo@example.org"}],
+        )
+        people = {p["email"]: p for p in result.structured_content["event"]["participants"]}
+        assert people["me@example.com"]["status"] == "accepted"
+        assert people["me@example.com"]["roles"] == {"owner": True}
+        assert people["jo@example.org"]["status"] == "needs-action"
+
+    async def test_the_reply_says_mail_went_out_rather_than_implying_silence(self, caldav):
+        result = await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert "sent invitations" in text_of(result)
+        assert result.structured_content["invited"] == ["jo@example.org"]
+
+    async def test_an_event_with_no_participants_gets_no_organizer(self, caldav):
+        # An ORGANIZER on a solo event makes it a meeting with one guest, and
+        # some clients then mail on every edit.
+        await server.create_event(title="Dentist", start="2026-09-03T10:00:00")
+        assert "ORGANIZER" not in body_of(caldav)
+
+    async def test_from_may_be_any_of_the_accounts_own_addresses(self, caldav):
+        await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+            organizer="me@example.net",
+        )
+        assert "me@example.net" in body_of(caldav)
+
+    async def test_a_foreign_from_is_refused_before_any_mail_goes_out(self, caldav):
+        # iCloud accepts the PUT and silently sends nothing, which is
+        # indistinguishable from success -- so this has to be caught here.
+        result = await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+            organizer="someone.else@example.com",
+        )
+        assert "not one of this account's addresses" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_from_without_participants_is_refused(self, caldav):
+        result = await server.create_event(
+            title="Dentist", start="2026-09-03T10:00:00", organizer="me@example.com"
+        )
+        assert "only applies when inviting participants" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "participants",
+        [
+            "jo@example.org",
+            [{"name": "Jo"}],
+            [{"email": ""}],
+            [{"email": "not-an-address"}],
+            ["jo@example.org"],
+        ],
+    )
+    async def test_malformed_participants_send_nothing_at_all(self, caldav, participants):
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00", participants=participants
+        )
+        assert "error" in result.structured_content
+        caldav.put.assert_not_awaited()
+
+    async def test_the_same_person_twice_is_invited_once(self, caldav):
+        await server.create_event(
+            title="Book Club",
+            start="2026-09-03T19:00:00",
+            participants=[
+                {"email": "jo@example.org"},
+                {"email": "JO@example.org", "name": "Jo again"},
+            ],
+        )
+        assert body_of(caldav).lower().count("jo@example.org") == 2  # ATTENDEE + EMAIL param
+
+
+def meeting_ics(uid="u1", partstat="NEEDS-ACTION"):
+    return "\r\n".join([
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        "SUMMARY:Book Club",
+        "DTSTART;TZID=America/Chicago:20260903T190000",
+        "DTEND;TZID=America/Chicago:20260903T200000",
+        "ORGANIZER;CN=Ada;EMAIL=ada@example.com:mailto:ada@example.com",
+        "ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED;EMAIL=ada@example.com:mailto:ada@example.com",
+        f"ATTENDEE;CN=Me;PARTSTAT={partstat};EMAIL=me@example.com:mailto:me@example.com",
+        "ATTENDEE;CN=Jo;PARTSTAT=NEEDS-ACTION;EMAIL=jo@example.org:mailto:jo@example.org",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    ])
+
+
+def meeting(caldav, uid="u1", partstat="NEEDS-ACTION"):
+    caldav.get = AsyncMock(
+        return_value=Resource(PERSONAL.id, f"{uid}.ics", "url", '"e"', meeting_ics(uid, partstat))
+    )
+    return ids.encode(PERSONAL.id, f"{uid}.ics")
+
+
+class TestUpdateParticipants:
+    async def test_adding_an_invitee_reports_who_was_mailed(self, caldav):
+        result = await server.update_event(
+            id=meeting(caldav), addParticipants=[{"name": "Sam", "email": "sam@example.net"}]
+        )
+        assert "sam@example.net" in body_of(caldav)
+        assert result.structured_content["invited"] == ["sam@example.net"]
+        assert "Invitations sent to" in text_of(result)
+
+    async def test_someone_already_invited_is_not_invited_twice(self, caldav):
+        result = await server.update_event(
+            id=meeting(caldav), addParticipants=[{"email": "jo@example.org"}]
+        )
+        assert result.structured_content["invited"] == []
+
+    async def test_removing_by_email_uninvites_exactly_that_person(self, caldav):
+        result = await server.update_event(
+            id=meeting(caldav), removeParticipants=["jo@example.org"]
+        )
+        assert "jo@example.org" not in body_of(caldav)
+        assert "me@example.com" in body_of(caldav)
+        assert result.structured_content["uninvited"] == ["jo@example.org"]
+
+    async def test_removing_by_display_name_works(self, caldav):
+        await server.update_event(id=meeting(caldav), removeParticipants=["Jo"])
+        assert "jo@example.org" not in body_of(caldav)
+
+    async def test_the_organizer_is_never_removed(self, caldav):
+        # Dropping the organizer orphans the event for every other guest.
+        result = await server.update_event(
+            id=meeting(caldav), removeParticipants=["ada@example.com"]
+        )
+        assert "ada@example.com" in body_of(caldav)
+        assert result.structured_content["uninvited"] == []
+
+    async def test_an_unknown_name_is_ignored_rather_than_failing_the_edit(self, caldav):
+        result = await server.update_event(
+            id=meeting(caldav), removeParticipants=["Nobody At All"]
+        )
+        assert "error" not in result.structured_content
+
+    async def test_an_ambiguous_name_changes_nothing(self, caldav):
+        ics = meeting_ics().replace(
+            "ATTENDEE;CN=Jo;PARTSTAT=NEEDS-ACTION;EMAIL=jo@example.org:mailto:jo@example.org",
+            "ATTENDEE;CN=Jo;PARTSTAT=NEEDS-ACTION;EMAIL=jo@example.org:mailto:jo@example.org\r\n"
+            "ATTENDEE;CN=Jo;PARTSTAT=NEEDS-ACTION;EMAIL=jo2@example.org:mailto:jo2@example.org",
+        )
+        caldav.get = AsyncMock(return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics))
+        result = await server.update_event(
+            id=ids.encode(PERSONAL.id, "u1.ics"), removeParticipants=["Jo"]
+        )
+        assert "Pass the email address" in text_of(result)
+        assert "Nothing was changed" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_participants_cannot_be_changed_on_a_single_occurrence(self, caldav):
+        ics = meeting_ics().replace("END:VEVENT", "RRULE:FREQ=WEEKLY\r\nEND:VEVENT")
+        caldav.get = AsyncMock(return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics))
+        result = await server.update_event(
+            id=ids.encode(PERSONAL.id, "u1.ics", "20260910T000000Z"),
+            addParticipants=[{"email": "sam@example.net"}],
+        )
+        assert "whole series" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_editing_an_event_with_guests_warns_that_mail_goes_out(self, caldav):
+        # A one-word title fix still mails everyone. Saying so is the point.
+        result = await server.update_event(id=meeting(caldav), title="Book Club (moved)")
+        assert "mailed them the update" in text_of(result)
+
+    async def test_editing_an_event_with_no_guests_makes_no_such_claim(self, caldav):
+        caldav.get = AsyncMock(return_value=resource("u1", "Dentist"))
+        result = await server.update_event(id=ids.encode(PERSONAL.id, "u1.ics"), title="Dentist v2")
+        assert "mailed" not in text_of(result)
+
+
+class TestRsvp:
+    async def test_accepting_sets_partstat_on_our_own_attendee_line(self, caldav):
+        result = await server.rsvp_event(id=meeting(caldav), status="accepted")
+        body = body_of(caldav)
+        mine = [l for l in body.splitlines() if "me@example.com" in l and "ATTENDEE" in l]
+        assert mine and "PARTSTAT=ACCEPTED" in mine[0]
+        assert result.structured_content["status"] == "accepted"
+        assert result.structured_content["respondedAs"] == "me@example.com"
+
+    async def test_answering_stops_the_server_asking_again(self, caldav):
+        await server.rsvp_event(id=meeting(caldav), status="declined")
+        mine = [
+            l for l in body_of(caldav).splitlines()
+            if "me@example.com" in l and "ATTENDEE" in l
+        ]
+        assert "RSVP=FALSE" in mine[0]
+
+    async def test_nobody_elses_status_is_touched(self, caldav):
+        await server.rsvp_event(id=meeting(caldav), status="declined")
+        body = body_of(caldav)
+        jo = [l for l in body.splitlines() if "jo@example.org" in l and "ATTENDEE" in l]
+        assert "PARTSTAT=NEEDS-ACTION" in jo[0]
+
+    async def test_it_says_the_organizer_was_told(self, caldav):
+        result = await server.rsvp_event(id=meeting(caldav), status="tentative")
+        assert "replied to ada@example.com" in text_of(result)
+
+    @pytest.mark.parametrize("status", ["yes", "maybe", "", "ACCEPT", None])
+    async def test_an_unsupported_status_is_refused(self, caldav, status):
+        result = await server.rsvp_event(id=meeting(caldav), status=status)
+        assert "accepted, tentative, declined" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_rsvping_to_your_own_event_is_refused_with_the_alternative(self, caldav):
+        ics = meeting_ics().replace("ada@example.com", "me@example.com")
+        caldav.get = AsyncMock(return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics))
+        result = await server.rsvp_event(id=ids.encode(PERSONAL.id, "u1.ics"), status="accepted")
+        assert "organizer of this event" in text_of(result)
+        assert "update_event" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_rsvping_when_not_invited_lists_who_is(self, caldav):
+        caldav.identities = AsyncMock(return_value=("mailto:stranger@example.com",))
+        result = await server.rsvp_event(id=meeting(caldav), status="accepted")
+        assert "not on this event's guest list" in text_of(result)
+        assert "jo@example.org" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_an_event_with_nobody_has_nothing_to_answer(self, caldav):
+        caldav.get = AsyncMock(return_value=resource("u1", "Dentist"))
+        result = await server.rsvp_event(id=ids.encode(PERSONAL.id, "u1.ics"), status="accepted")
+        assert "nothing to respond to" in text_of(result)
+        caldav.put.assert_not_awaited()
+
+    async def test_any_of_our_addresses_can_be_the_invited_one(self, caldav):
+        # The invitation names one address; the account owns several.
+        ics = meeting_ics().replace("me@example.com", "me@example.net")
+        caldav.get = AsyncMock(return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics))
+        result = await server.rsvp_event(id=ids.encode(PERSONAL.id, "u1.ics"), status="accepted")
+        assert result.structured_content["respondedAs"] == "me@example.net"

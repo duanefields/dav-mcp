@@ -103,7 +103,24 @@ that UI. Write confirmation is left to the client's own tool-approval prompt.
 Reminders (VTODO) are out of scope. VTODO calendars are filtered out of
 `list_calendars`.
 
-Participants and RSVP are not implemented yet. iCloud advertises
-`calendar-auto-schedule`, so it will send iMIP invitations itself once an event
-carries an ORGANIZER and ATTENDEEs — meaning that work sends real email to real
-people and needs care.
+## Scheduling sends real, irrevocable email
+
+`create_event(participants=…)`, `update_event(addParticipants/removeParticipants)`
+and `rsvp_event` all make iCloud send iMIP mail the instant the PUT lands. There
+is no local send step to intercept and no way to recall a message. When changing
+this code:
+
+- **Validate before writing, never partially.** A malformed participant list is
+  rejected whole; half-inviting a list mails some people and not others.
+  Every rejection path is covered by a test asserting `put` was never awaited —
+  keep it that way.
+- **The organizer must be one of the account's own calendar-user-addresses.**
+  iCloud accepts a PUT naming a foreign organizer and silently sends nothing,
+  which looks exactly like success. `_resolve_organizer` checks it up front.
+- **Do not add an ORGANIZER to an event with no guests.** It turns a personal
+  event into a one-person meeting, and some clients then mail on every edit.
+- **Any edit to an event with guests mails all of them.** The tool replies say
+  so; do not make them quieter.
+- The organizer is also an attendee with `PARTSTAT=ACCEPTED`, and is never
+  removable via `removeParticipants` — dropping them orphans the event for
+  everyone else.

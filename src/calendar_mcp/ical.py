@@ -541,15 +541,169 @@ def make_address(email: str, name: str = "") -> vCalAddress:
     return address
 
 
+# ----------------------------------------------------------------------
+# Scheduling
+#
+# iCloud advertises ``calendar-auto-schedule``, so it sends the iMIP mail
+# itself (RFC 6638): PUT an event carrying an ORGANIZER that matches one of the
+# account's own calendar-user-addresses plus ATTENDEE lines, and invitations go
+# out. Change your own ATTENDEE's PARTSTAT and a REPLY goes to the organizer.
+# Nothing here speaks SMTP, and nothing here can un-send anything.
+# ----------------------------------------------------------------------
+
+
+def attendees_of(event: IEvent) -> list[vCalAddress]:
+    """Every ATTENDEE on an event, always as a list."""
+    found = event.get("ATTENDEE")
+    if found is None:
+        return []
+    return list(found) if isinstance(found, list) else [found]
+
+
+def organizer_email(event: IEvent) -> str:
+    return _address_email(event.get("ORGANIZER"))
+
+
+def set_organizer(event: IEvent, email: str, name: str = "") -> None:
+    if "ORGANIZER" in event:
+        del event["ORGANIZER"]
+    event.add("ORGANIZER", make_address(email, name))
+
+
+def _write_attendees(event: IEvent, attendees: list[vCalAddress]) -> None:
+    """Replace the ATTENDEE list wholesale.
+
+    icalendar appends on ``add``, so removing one means rebuilding the set.
+    """
+    if "ATTENDEE" in event:
+        del event["ATTENDEE"]
+    for attendee in attendees:
+        event.add("ATTENDEE", attendee)
+
+
+def add_attendee(
+    event: IEvent,
+    email: str,
+    name: str = "",
+    *,
+    partstat: str = "NEEDS-ACTION",
+    rsvp: bool = True,
+) -> bool:
+    """Invite one person. Returns False if they were already invited.
+
+    Matching is on the lowercased address: an invitation sent twice to the same
+    person with different capitalization is a duplicate, not a second guest.
+    """
+    existing = attendees_of(event)
+    if any(_address_email(a).lower() == email.lower() for a in existing):
+        return False
+
+    attendee = make_address(email, name)
+    attendee.params["CUTYPE"] = vText("INDIVIDUAL")
+    attendee.params["ROLE"] = vText("REQ-PARTICIPANT")
+    attendee.params["PARTSTAT"] = vText(partstat)
+    if rsvp:
+        attendee.params["RSVP"] = vText("TRUE")
+    _write_attendees(event, [*existing, attendee])
+    return True
+
+
+def remove_attendees(
+    event: IEvent, targets: list[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """Uninvite people by email or display name.
+
+    Returns ``(removed, unmatched, ambiguous)``. The organizer is never removed
+    -- uninviting them is a different operation (cancel the event) and doing it
+    by accident would orphan the series for everyone else.
+    """
+    attendees = attendees_of(event)
+    organizer = organizer_email(event).lower()
+    removed: list[str] = []
+    unmatched: list[str] = []
+    ambiguous: list[str] = []
+    drop: set[int] = set()
+
+    for target in targets:
+        needle = target.strip().lower()
+        if not needle:
+            continue
+        if "@" in needle:
+            hits = [
+                i
+                for i, a in enumerate(attendees)
+                if _address_email(a).lower() == needle
+            ]
+        else:
+            hits = [
+                i
+                for i, a in enumerate(attendees)
+                if str(a.params.get("CN", "")).strip().lower() == needle
+            ]
+
+        hits = [i for i in hits if _address_email(attendees[i]).lower() != organizer]
+
+        if not hits:
+            unmatched.append(target)
+        elif len(hits) > 1:
+            ambiguous.append(target)
+        else:
+            drop.add(hits[0])
+            removed.append(_address_email(attendees[hits[0]]) or target)
+
+    if drop:
+        _write_attendees(
+            event, [a for i, a in enumerate(attendees) if i not in drop]
+        )
+    return removed, unmatched, ambiguous
+
+
+def set_partstat(event: IEvent, addresses: tuple[str, ...], status: str) -> str:
+    """Set the account's own PARTSTAT on an event. Returns the address matched.
+
+    ``addresses`` are the account's calendar-user-addresses; an account often
+    has several and the invitation only ever names one of them. Raises if none
+    of them is on the guest list, because silently inviting yourself in order to
+    answer would be a strange thing to do on someone else's event.
+    """
+    attendees = attendees_of(event)
+    if not attendees:
+        raise ICalError(
+            "This event has no participants, so there is nothing to respond to."
+        )
+
+    owned = {a.lower().removeprefix("mailto:") for a in addresses}
+    for attendee in attendees:
+        email = _address_email(attendee).lower()
+        if email in owned:
+            attendee.params["PARTSTAT"] = vText(status.upper())
+            # Answering settles the question, so the server should stop asking.
+            attendee.params["RSVP"] = vText("FALSE")
+            _write_attendees(event, attendees)
+            return email
+
+    invited = ", ".join(_address_email(a) for a in attendees if _address_email(a))
+    raise ICalError(
+        "You are not on this event's guest list, so there is no invitation to "
+        f"respond to. Invited: {invited or '(nobody with an address)'}."
+    )
+
+
 __all__ = [
     "DateError",
     "ICalError",
     "PRODID",
     "build_event",
     "build_resource",
+    "add_attendee",
+    "attendees_of",
     "event_to_dict",
+    "organizer_email",
     "recurrence_id_value",
     "recurrence_key",
+    "remove_attendees",
+    "set_organizer",
+    "set_partstat",
     "make_address",
     "new_uid",
     "parse_duration",

@@ -20,8 +20,27 @@ and it needs none of the macOS privacy grants that an EventKit-based server does
 | `create_event` | Create a timed, all-day, or recurring event. |
 | `update_event` | Change any field. Given an occurrence id, edits that occurrence alone; given the series id, edits the series. |
 | `delete_event` | Delete an event. Given an occurrence id, cancels that occurrence and leaves the series intact. |
+| `rsvp_event` | Respond to an invitation: accepted, tentative or declined. |
 
 `GET /health` is served unauthenticated alongside them, for monitoring.
+
+### Invitations send real mail
+
+`create_event(participants=…)`, `update_event(addParticipants=…/removeParticipants=…)`
+and `rsvp_event` all cause iCloud to send iMIP email, immediately and
+irrevocably. iCloud advertises `calendar-auto-schedule`, so it does the sending
+itself the moment a PUT lands — this server never touches SMTP and has no way to
+recall anything.
+
+Two consequences worth knowing before wiring this to a model:
+
+- **Any** edit to an event that already has guests mails all of them, including
+  a one-word title fix. The tools say so in their replies rather than presenting
+  such an edit as silent.
+- The organizer address must be one of the account's own
+  calendar-user-addresses. iCloud accepts a PUT naming a foreign organizer and
+  then silently sends nothing, which is indistinguishable from success — so
+  `from` is validated against the account's real identities before writing.
 
 ## Setup
 
@@ -104,6 +123,10 @@ account rather than taken from the spec:
 - **`RECURRENCE-ID` comes back in UTC** while `DTSTART` stays in the event's own
   zone. Event ids therefore carry the literal server form of the key and only
   ever round-trip it; the human-readable `recurrenceId` is converted for display.
+- **Scheduling is the server's job, not ours.** `OPTIONS` advertises
+  `calendar-auto-schedule`, so an ORGANIZER plus ATTENDEEs on a PUT is all it
+  takes to send invitations, and changing your own `PARTSTAT` is all it takes to
+  reply.
 
 ## Development
 

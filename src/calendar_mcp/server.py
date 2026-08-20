@@ -13,9 +13,10 @@ import os
 import platform
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from pydantic import Field
 from fastmcp.tools.tool import ToolResult
 from starlette.responses import JSONResponse
 
@@ -189,6 +190,75 @@ def _matches(event: dict[str, Any], needle: str) -> bool:
     return needle in " \n".join(haystack).lower()
 
 
+RSVP_STATUSES = {"accepted": "ACCEPTED", "tentative": "TENTATIVE", "declined": "DECLINED"}
+
+
+def _clean_participants(participants: list | None) -> tuple[list[dict], str | None]:
+    """Validate the participants argument. Returns ``(people, error)``.
+
+    Rejected wholesale rather than partially: half-inviting a list because one
+    entry was malformed sends real mail to some people and not others, and
+    there is no way to take it back.
+    """
+    if not participants:
+        return [], None
+
+    if not isinstance(participants, list):
+        return [], 'participants must be a list, for example [{"name": "Jo", "email": "jo@example.com"}].'
+
+    people: list[dict] = []
+    for index, entry in enumerate(participants):
+        if not isinstance(entry, dict):
+            return [], (
+                f"participants[{index}] must be an object with an email, "
+                f'for example {{"name": "Jo", "email": "jo@example.com"}}; got {entry!r}.'
+            )
+        email = str(entry.get("email", "")).strip()
+        if not email or "@" not in email:
+            return [], (
+                f"participants[{index}] needs a valid email address; got {entry.get('email')!r}."
+            )
+        people.append({"email": email, "name": str(entry.get("name", "")).strip()})
+
+    seen: set[str] = set()
+    unique = []
+    for person in people:
+        key = person["email"].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(person)
+    return unique, None
+
+
+async def _resolve_organizer(requested: str | None) -> tuple[str, str | None]:
+    """Pick the address to organize from. Returns ``(email, error)``.
+
+    It must be one of the account's own calendar-user-addresses. iCloud will
+    not schedule on behalf of an address it does not recognize as ours -- it
+    accepts the PUT and quietly sends nothing, which looks exactly like success.
+    """
+    identities = await client().identities()
+    usable = [address.removeprefix("mailto:") for address in identities]
+    if not usable:
+        return "", (
+            "This account publishes no scheduling addresses, so it cannot send "
+            "invitations."
+        )
+
+    if not requested:
+        return usable[0], None
+
+    wanted = requested.strip().lower().removeprefix("mailto:")
+    for address in usable:
+        if address.lower() == wanted:
+            return address, None
+
+    return "", (
+        f"{requested!r} is not one of this account's addresses, so iCloud will "
+        "not send invitations from it. Available: " + ", ".join(usable) + "."
+    )
+
+
 def _validate_limit(limit: int | None) -> str | None:
     if limit is None:
         return None
@@ -342,6 +412,18 @@ async def create_event(
     timeZone: str | None = None,
     color: str | None = None,
     recurrence: dict | None = None,
+    participants: list | None = None,
+    organizer: Annotated[
+        str | None,
+        Field(
+            alias="from",
+            description=(
+                "Email address to organize the event from when inviting "
+                "participants. Must match one of the account's own addresses. "
+                "If omitted, the account's primary address is used."
+            ),
+        ),
+    ] = None,
 ) -> ToolResult:
     """Create a calendar event. Returns the new event's id.
 
@@ -374,9 +456,17 @@ async def create_event(
             occurrences), until (stop after this date-time). Examples:
             {"frequency": "weekly"}; {"frequency": "weekly", "interval": 2,
             "byDay": ["mo","we","fr"]}.
+        participants: Invitees, e.g. [{"name": "Jo", "email": "jo@example.com"}].
+            The account is added automatically as organizer; do not include it
+            here. THIS SENDS REAL INVITATION EMAILS immediately, and they cannot
+            be recalled -- omit this argument unless the user asked for guests.
     """
     if not title or not title.strip():
         return _error_result("title is required.")
+
+    people, error = _clean_participants(participants)
+    if error:
+        return _error_result(error)
 
     all_day = bool(isAllDay)
     zone = local_zone()
@@ -422,6 +512,17 @@ async def create_event(
     if target.read_only:
         return _error_result(f"The calendar {target.name!r} is read-only.")
 
+    organizer_email = ""
+    if people:
+        organizer_email, error = await _resolve_organizer(organizer)
+        if error:
+            return _error_result(error)
+    elif organizer:
+        return _error_result(
+            "'from' only applies when inviting participants. Pass participants "
+            "as well, or omit 'from'."
+        )
+
     try:
         event = ical.build_event(
             uid=ical.new_uid(),
@@ -435,6 +536,15 @@ async def create_event(
             color=(color or "").strip(),
             recurrence=recurrence,
         )
+        if people:
+            # The organizer is also an attendee, and has by definition accepted;
+            # without this they do not appear on their own guest list.
+            ical.set_organizer(event, organizer_email)
+            ical.add_attendee(
+                event, organizer_email, partstat="ACCEPTED", rsvp=False
+            )
+            for person in people:
+                ical.add_attendee(event, person["email"], person["name"])
         uid = str(event["UID"])
         body = ical.build_resource([event], {tzid} if tzid else set())
     except (ical.ICalError, ValueError) as exc:
@@ -455,9 +565,16 @@ async def create_event(
         resource_name=name,
         calendar_color=target.color,
     )
+    headline = f"Created event in {target.name}."
+    if people:
+        headline += (
+            f" iCloud has sent invitations from {organizer_email} to "
+            + ", ".join(person["email"] for person in people)
+            + "."
+        )
     return _result(
-        f"Created event in {target.name}.\n\n{format_event(payload)}",
-        {"id": event_id, "event": payload},
+        f"{headline}\n\n{format_event(payload)}",
+        {"id": event_id, "event": payload, "invited": [p["email"] for p in people]},
     )
 
 
@@ -473,6 +590,19 @@ async def update_event(
     isAllDay: bool | None = None,
     color: str | None = None,
     recurrence: dict | None = None,
+    addParticipants: list | None = None,
+    removeParticipants: list | None = None,
+    organizer: Annotated[
+        str | None,
+        Field(
+            alias="from",
+            description=(
+                "Email address to organize from when adding the first "
+                "participants. Must match one of the account's own addresses. "
+                "Has no effect when the event already has an organizer."
+            ),
+        ),
+    ] = None,
 ) -> ToolResult:
     """Update an existing calendar event.
 
@@ -494,11 +624,33 @@ async def update_event(
             from the calendar.
         recurrence: Recurrence rules, same shape as create_event's recurrence.
             Only meaningful on a series master.
+        addParticipants: Invitees to add, e.g. [{"name": "Jo", "email":
+            "jo@example.com"}]. Duplicates against existing invitees are
+            skipped. SENDS REAL INVITATION EMAILS.
+        removeParticipants: Invitees to uninvite, by email or display name.
+            Matching is case-insensitive; a name matching more than one invitee
+            is an error, so pass the email to disambiguate. The organizer is
+            never removed. SENDS REAL CANCELLATIONS.
+
+    Note: any change to an event that already has invitees makes iCloud send an
+    updated invitation to all of them. Mail goes out even for an edit as small
+    as a typo fix, so say so rather than presenting the edit as silent.
     """
     try:
         calendar_id, resource_name, recurrence_id = ids.decode(id)
     except ids.BadEventId as exc:
         return _error_result(str(exc))
+
+    joining, error = _clean_participants(addParticipants)
+    if error:
+        return _error_result(error)
+
+    leaving = removeParticipants or []
+    if leaving and not isinstance(leaving, list):
+        return _error_result(
+            'removeParticipants must be a list of emails or names, for example '
+            '["jo@example.com"].'
+        )
 
     try:
         target = await client().calendar(calendar_id)
@@ -554,6 +706,43 @@ async def update_event(
     if color is not None:
         ical.set_field(event, "COLOR", color.strip())
 
+    invited: list[str] = []
+    uninvited: list[str] = []
+    if joining or leaving:
+        if recurrence_id:
+            return _error_result(
+                "Participants are a property of the whole series, not of one "
+                "occurrence. Pass the master event's id rather than an "
+                "occurrence id."
+            )
+
+        if joining and not ical.organizer_email(event):
+            organizer_address, error = await _resolve_organizer(organizer)
+            if error:
+                return _error_result(error)
+            ical.set_organizer(event, organizer_address)
+            ical.add_attendee(
+                event, organizer_address, partstat="ACCEPTED", rsvp=False
+            )
+
+        if leaving:
+            removed, unmatched, ambiguous = ical.remove_attendees(
+                event, [str(entry) for entry in leaving]
+            )
+            if ambiguous:
+                return _error_result(
+                    "More than one invitee matches "
+                    + ", ".join(repr(name) for name in ambiguous)
+                    + ". Pass the email address instead. Nothing was changed."
+                )
+            uninvited = removed
+            if unmatched:
+                logger.info("removeParticipants matched nothing: %s", unmatched)
+
+        for person in joining:
+            if ical.add_attendee(event, person["email"], person["name"]):
+                invited.append(person["email"])
+
     if recurrence is not None:
         if recurrence_id:
             return _error_result(
@@ -592,7 +781,21 @@ async def update_event(
         resource_name=resource_name,
         calendar_color=target.color,
     )
-    return _result(f"Updated event.\n\n{format_event(payload)}", {"event": payload})
+
+    headline = "Updated event."
+    if invited:
+        headline += " Invitations sent to " + ", ".join(invited) + "."
+    if uninvited:
+        headline += " Cancellations sent to " + ", ".join(uninvited) + "."
+    if payload["participants"] and not (invited or uninvited):
+        headline += (
+            " This event has invitees, so iCloud has mailed them the update."
+        )
+
+    return _result(
+        f"{headline}\n\n{format_event(payload)}",
+        {"event": payload, "invited": invited, "uninvited": uninvited},
+    )
 
 
 def _select_occurrence(
@@ -639,6 +842,87 @@ def _clone_as_override(master: Any, recurrence_id: str) -> Any:
         ical.recurrence_id_value(recurrence_id, master.get("DTSTART").dt),
     )
     return override
+
+
+@mcp.tool
+async def rsvp_event(id: str, status: str) -> ToolResult:
+    """Respond to a calendar event invitation.
+
+    Sets your participation status and sends a reply to the organizer.
+
+    For a recurring event, pass an occurrence id to respond for that occurrence
+    alone, or the series id to respond to the whole series.
+
+    Args:
+        id: The event ID to RSVP to, as returned by search_events.
+        status: Your response: accepted (going), tentative (maybe), or declined
+            (not going).
+    """
+    wanted = (status or "").strip().lower()
+    if wanted not in RSVP_STATUSES:
+        return _error_result(
+            f"status must be one of accepted, tentative, declined; got {status!r}."
+        )
+
+    try:
+        calendar_id, resource_name, recurrence_id = ids.decode(id)
+    except ids.BadEventId as exc:
+        return _error_result(str(exc))
+
+    try:
+        target = await client().calendar(calendar_id)
+        if target.read_only:
+            return _error_result(
+                f"The calendar {target.name!r} is read-only, so a reply cannot "
+                "be recorded on it."
+            )
+        resource = await client().get(target, resource_name)
+        events = ical.parse_resource(resource.ics)
+        event, events = _select_occurrence(events, recurrence_id)
+    except (CalDavError, ical.ICalError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    organizer = ical.organizer_email(event)
+    identities = await client().identities()
+    owned = {a.lower().removeprefix("mailto:") for a in identities}
+    if organizer and organizer.lower() in owned:
+        return _error_result(
+            "You are the organizer of this event, so there is no invitation to "
+            "answer. Use update_event to change it, or delete_event to cancel it."
+        )
+
+    try:
+        answered_as = ical.set_partstat(event, identities, RSVP_STATUSES[wanted])
+    except ical.ICalError as exc:
+        return _error_result(str(exc))
+
+    ical.touch(event)
+
+    try:
+        tzids = {
+            ical.event_to_dict(ev, calendar_id=target.id, resource_name=resource_name)[
+                "timeZone"
+            ]
+            for ev in events
+        }
+        body = ical.build_resource(events, {tz for tz in tzids if tz})
+        await client().put(target, resource_name, body, etag=resource.etag)
+    except (CalDavError, ical.ICalError) as exc:
+        _record_write("rsvp_event", False, str(exc))
+        return _error_result(f"Could not record the reply: {exc}")
+
+    _record_write("rsvp_event", True)
+    payload = ical.event_to_dict(
+        event,
+        calendar_id=target.id,
+        resource_name=resource_name,
+        calendar_color=target.color,
+    )
+    told = f" iCloud has replied to {organizer}." if organizer else ""
+    return _result(
+        f"Responded {wanted} as {answered_as}.{told}\n\n{format_event(payload)}",
+        {"status": wanted, "respondedAs": answered_as, "event": payload},
+    )
 
 
 @mcp.tool
