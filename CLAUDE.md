@@ -50,7 +50,12 @@ so that each file has exactly one thing that can go wrong in it:
    expressions) and ISO 8601 duration conversion.
 5. **src/calendar_mcp/server.py** — the tools, the `/health` route, and
    transport selection in `main()`.
-6. **src/calendar_mcp/auth.py** — password-guarded OAuth 2.1 provider for the
+6. **src/calendar_mcp/availability.py** — interval arithmetic for
+   `find_free_time`: merge, invert, per-day working windows, slot search. Pure
+   functions over aware datetimes, so it is tested without a network or a
+   clock. Which events *count* as busy is decided in `server._busy_intervals`,
+   not here — that is policy, not arithmetic.
+7. **src/calendar_mcp/auth.py** — password-guarded OAuth 2.1 provider for the
    HTTP transport. Ported from things-mcp; domain-independent apart from the
    scope name and the env prefix.
 
@@ -102,7 +107,16 @@ understood, so check here before assuming the spec applies:
 
 ## Scope
 
-The tool surface deliberately mirrors the Fastmail calendar tools.
+The tool surface deliberately mirrors the Fastmail calendar tools, with
+`find_free_time` added on top — Fastmail has no availability tool, so that one
+is an addition rather than parity.
+
+Free/busy lookup for *other people* (RFC 6638 scheduling-outbox `VFREEBUSY`) is
+deliberately not built. The account has a `schedule-outbox` and the mechanism
+exists, but there is no working federated free/busy across providers on the
+open internet: iCloud asking Gmail about an external address generally returns
+`3.7` or nothing. Do not add it without first probing real addresses and
+confirming useful data comes back.
 `compose_event` is intentionally absent: it stages an event into a confirmation
 widget that only exists inside claude.ai, and a third-party server cannot summon
 that UI. Write confirmation is left to the client's own tool-approval prompt.

@@ -719,3 +719,174 @@ class TestDeliveryReporting:
         caldav.get = AsyncMock()
         await server.create_event(title="Dentist", start="2026-09-03T10:00:00")
         caldav.get.assert_not_awaited()
+
+
+# ----------------------------------------------------------------------
+# find_free_time
+#
+# The interval maths lives in test_availability.py. What is pinned here is the
+# policy: which events count as busy at all. Get that wrong and the tool fails
+# in opposite directions -- count everything and a calendar with a birthday on
+# it has no free time; count nothing and it offers slots during real meetings.
+# ----------------------------------------------------------------------
+
+
+def timed(uid, summary, day, hour, hours=1, extra=()):
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT",
+        f"UID:{uid}", f"SUMMARY:{summary}",
+        f"DTSTART;TZID=America/Chicago:202609{day:02d}T{hour:02d}0000",
+        f"DTEND;TZID=America/Chicago:202609{day:02d}T{hour + hours:02d}0000",
+        *extra, "END:VEVENT", "END:VCALENDAR", "",
+    ]
+    return Resource(PERSONAL.id, f"{uid}.ics", "url", '"e"', "\r\n".join(lines))
+
+
+def all_day(uid, summary, day):
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT",
+        f"UID:{uid}", f"SUMMARY:{summary}",
+        f"DTSTART;VALUE=DATE:202609{day:02d}",
+        f"DTEND;VALUE=DATE:202609{day + 1:02d}",
+        "END:VEVENT", "END:VCALENDAR", "",
+    ]
+    return Resource(PERSONAL.id, f"{uid}.ics", "url", '"e"', "\r\n".join(lines))
+
+
+async def free_time(caldav, **kwargs):
+    kwargs.setdefault("duration", "PT1H")
+    kwargs.setdefault("after", "2026-09-14T00:00:00")
+    kwargs.setdefault("before", "2026-09-15T00:00:00")
+    return await server.find_free_time(**kwargs)
+
+
+class TestFindFreeTime:
+    async def test_an_empty_day_offers_the_whole_working_day(self, caldav):
+        result = await free_time(caldav)
+        items = result.structured_content["items"]
+        assert items[0]["start"] == "2026-09-14T09:00:00"
+        assert items[0]["end"] == "2026-09-14T17:00:00"
+
+    async def test_a_meeting_splits_the_day(self, caldav):
+        caldav.query.return_value = [timed("m1", "Standup", 14, 12)]
+        items = (await free_time(caldav)).structured_content["items"]
+        assert [(i["start"][11:16], i["end"][11:16]) for i in items] == [
+            ("09:00", "12:00"),
+            ("13:00", "17:00"),
+        ]
+
+    async def test_working_hours_are_configurable(self, caldav):
+        items = (await free_time(caldav, dayStart="08:00", dayEnd="10:00")).structured_content["items"]
+        assert items[0]["start"][11:16] == "08:00"
+        assert items[0]["end"][11:16] == "10:00"
+
+    async def test_a_backwards_working_day_is_refused(self, caldav):
+        result = await free_time(caldav, dayStart="17:00", dayEnd="09:00")
+        assert "must be later than" in text_of(result)
+
+    async def test_a_malformed_clock_says_what_it_wanted(self, caldav):
+        result = await free_time(caldav, dayStart="half nine")
+        assert '"09:00"' in text_of(result)
+
+    async def test_weekends_are_excluded_by_default(self, caldav):
+        # 2026-09-19 is a Saturday.
+        result = await free_time(
+            caldav, after="2026-09-19T00:00:00", before="2026-09-20T23:59:00"
+        )
+        assert result.structured_content["items"] == []
+        assert "weekends are excluded" in text_of(result)
+
+    async def test_weekends_can_be_included(self, caldav):
+        result = await free_time(
+            caldav, after="2026-09-19T00:00:00", before="2026-09-20T23:59:00",
+            includeWeekends=True,
+        )
+        assert result.structured_content["items"]
+
+    async def test_a_zero_duration_is_refused(self, caldav):
+        assert "positive" in text_of(await free_time(caldav, duration="PT0S"))
+
+    async def test_an_empty_range_is_refused(self, caldav):
+        result = await free_time(caldav, after="2026-09-15", before="2026-09-14")
+        assert "range is empty" in text_of(result)
+
+    async def test_no_opening_explains_how_to_widen_the_search(self, caldav):
+        caldav.query.return_value = [timed("m1", "All day meeting", 14, 9, hours=8)]
+        result = await free_time(caldav)
+        assert result.structured_content["items"] == []
+        assert "Widen the range" in text_of(result)
+
+    async def test_the_limit_is_honored(self, caldav):
+        result = await free_time(
+            caldav, after="2026-09-14", before="2026-09-19", limit=2
+        )
+        assert result.structured_content["count"] == 2
+
+
+class TestWhatCountsAsBusy:
+    async def test_a_normal_meeting_blocks(self, caldav):
+        caldav.query.return_value = [timed("m1", "Standup", 14, 12)]
+        items = (await free_time(caldav)).structured_content["items"]
+        assert len(items) == 2
+
+    async def test_an_event_marked_free_does_not_block(self, caldav):
+        # TRANSP:TRANSPARENT is the standard "on my calendar but not busy".
+        caldav.query.return_value = [
+            timed("m1", "Reminder", 14, 12, extra=["TRANSP:TRANSPARENT"])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 1
+
+    async def test_a_cancelled_event_does_not_block(self, caldav):
+        caldav.query.return_value = [
+            timed("m1", "Cancelled thing", 14, 12, extra=["STATUS:CANCELLED"])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 1
+
+    async def test_a_declined_invitation_does_not_block(self, caldav):
+        # Apple leaves declined invitations on the calendar. Counting them
+        # would block the week with meetings the user refused.
+        caldav.query.return_value = [
+            timed("m1", "Optional sync", 14, 12, extra=[
+                "ORGANIZER;EMAIL=ada@example.com:mailto:ada@example.com",
+                "ATTENDEE;PARTSTAT=DECLINED;EMAIL=me@example.com:mailto:me@example.com",
+            ])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 1
+
+    async def test_an_accepted_invitation_still_blocks(self, caldav):
+        caldav.query.return_value = [
+            timed("m1", "Real meeting", 14, 12, extra=[
+                "ORGANIZER;EMAIL=ada@example.com:mailto:ada@example.com",
+                "ATTENDEE;PARTSTAT=ACCEPTED;EMAIL=me@example.com:mailto:me@example.com",
+            ])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 2
+
+    async def test_an_unanswered_invitation_still_blocks(self, caldav):
+        # Not having replied yet is not the same as having declined.
+        caldav.query.return_value = [
+            timed("m1", "Pending", 14, 12, extra=[
+                "ORGANIZER;EMAIL=ada@example.com:mailto:ada@example.com",
+                "ATTENDEE;PARTSTAT=NEEDS-ACTION;EMAIL=me@example.com:mailto:me@example.com",
+            ])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 2
+
+    async def test_someone_elses_decline_does_not_free_our_time(self, caldav):
+        caldav.query.return_value = [
+            timed("m1", "Meeting", 14, 12, extra=[
+                "ORGANIZER;EMAIL=me@example.com:mailto:me@example.com",
+                "ATTENDEE;PARTSTAT=DECLINED;EMAIL=jo@example.org:mailto:jo@example.org",
+            ])
+        ]
+        assert len((await free_time(caldav)).structured_content["items"]) == 2
+
+    async def test_an_all_day_event_does_not_block_but_is_reported(self, caldav):
+        # "First Day of School" does not occupy the day; a trip does. Rather
+        # than guess, it is excluded and surfaced for the caller to weigh.
+        caldav.query.return_value = [all_day("a1", "First Day of School", 14)]
+        result = await free_time(caldav)
+        assert len(result.structured_content["items"]) == 1
+        assert result.structured_content["allDayEvents"][0]["title"] == "First Day of School"
+        assert "not treated as busy" in text_of(result)
+        assert "First Day of School" in text_of(result)

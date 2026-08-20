@@ -4,7 +4,7 @@ An MCP server for Apple iCloud Calendar, over CalDAV.
 
 It exposes the same calendar surface the Fastmail MCP server does — list, search,
 create, update, delete, RSVP — so a model that has driven one can drive the other
-without relearning field names. It runs over stdio locally, or over authenticated
+without relearning field names, plus `find_free_time` for scheduling. It runs over stdio locally, or over authenticated
 HTTP for a remote client such as a Claude connector.
 
 No local app, no EventKit, no AppleScript: it talks to `caldav.icloud.com`
@@ -21,6 +21,7 @@ and it needs none of the macOS privacy grants that an EventKit-based server does
 | `update_event` | Change any field. Given an occurrence id, edits that occurrence alone; given the series id, edits the series. |
 | `delete_event` | Delete an event. Given an occurrence id, cancels that occurrence and leaves the series intact. |
 | `rsvp_event` | Respond to an invitation: accepted, tentative or declined. |
+| `find_free_time` | Find openings long enough for something, honoring working hours and what actually counts as busy. |
 
 `GET /health` is served unauthenticated alongside them, for monitoring.
 
@@ -46,6 +47,25 @@ Two consequences worth knowing before wiring this to a model:
   `SCHEDULE-STATUS` is reported: who it reached, and who it did not. An address
   whose mail server refuses the message comes back `5.1`, and the tool says so
   rather than claiming the invitation was sent.
+
+### What counts as busy
+
+`find_free_time` exists because slot arithmetic across a week is exactly what
+models get wrong, and because "am I free" is not the same question as "what is
+on my calendar". Three kinds of event are deliberately **not** treated as busy:
+
+- **Events marked free** — `TRANSP:TRANSPARENT`, the standard "on my calendar
+  but not occupying me" signal — and cancelled events.
+- **Invitations the user declined.** Apple leaves them on the calendar, and
+  counting a meeting you refused would block the week with things you are not
+  attending. Not having replied *yet* still counts as busy.
+- **All-day events.** Whether one occupies the day is genuinely ambiguous — a
+  birthday does not, a multi-day trip does — so rather than guess, they are
+  excluded from the arithmetic and listed separately in the reply.
+
+Openings are reported at their full length rather than trimmed to the requested
+duration: knowing a two-hour gap exists is more useful than being told an hour
+fits somewhere in it.
 
 ## Setup
 

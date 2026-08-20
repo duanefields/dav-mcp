@@ -13,17 +13,20 @@ import os
 import platform
 import time
 from datetime import datetime, timedelta
+from datetime import time as clock_time
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastmcp import FastMCP
 from pydantic import Field
 from fastmcp.tools.tool import ToolResult
 from starlette.responses import JSONResponse
 
-from . import caldav, ical, ids
+from . import availability, caldav, ical, ids
 from .caldav import CalDavClient, CalDavError
 from .dates import (
     DateError,
+    format_duration,
     has_explicit_offset,
     local_zone,
     parse_duration,
@@ -459,6 +462,244 @@ async def search_events(
     events.sort(key=lambda event: (event.get("start", ""), event.get("title", "")))
     total = len(events)
     return _events_result(events[:effective_limit], total, effective_limit, 0)
+
+
+def _parse_clock(value: str | None, default: clock_time, name: str) -> clock_time:
+    """Parse a "HH:MM" working-hours bound."""
+    if value is None or not str(value).strip():
+        return default
+    text = str(value).strip()
+    for fmt in ("%H:%M", "%H:%M:%S", "%H"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    raise DateError(f'{name} must look like "09:00"; got {value!r}.')
+
+
+def _busy_intervals(
+    events: list[dict[str, Any]], identities: set[str], zone
+) -> tuple[list[tuple[datetime, datetime]], list[dict[str, Any]]]:
+    """Turn events into busy intervals. Returns ``(busy, all_day_events)``.
+
+    Three kinds of event are deliberately not treated as busy:
+
+    * Anything the event itself marks free -- ``TRANSP:TRANSPARENT`` or
+      ``STATUS:CANCELLED`` (see ``ical._blocks_time``).
+    * Anything the user declined. Apple leaves declined invitations on the
+      calendar, and counting a meeting you refused would block the week with
+      things you are not attending.
+    * All-day events. Whether one occupies the day is genuinely ambiguous --
+      "First Day of School" does not, a multi-day trip does -- so they are
+      excluded from the arithmetic and handed back separately for the caller
+      to mention rather than silently guessed at.
+    """
+    busy: list[tuple[datetime, datetime]] = []
+    all_day: list[dict[str, Any]] = []
+
+    for event in events:
+        if event.get("isAllDay"):
+            all_day.append(event)
+            continue
+        if not event.get("blocksTime", True):
+            continue
+
+        mine = [
+            person
+            for person in event.get("participants") or []
+            if person.get("email", "").lower() in identities
+        ]
+        if mine and all(person.get("status") == "declined" for person in mine):
+            continue
+
+        try:
+            naive = datetime.fromisoformat(event["start"])
+            tzid = event.get("timeZone") or ""
+            start = naive.replace(tzinfo=ZoneInfo(tzid) if tzid else zone)
+            end = start + parse_duration(event["duration"])
+        except (ValueError, KeyError, DateError):
+            logger.warning("Skipping unreadable event in availability: %s", event.get("id"))
+            continue
+
+        busy.append((start, end))
+
+    return busy, all_day
+
+
+@mcp.tool
+async def find_free_time(
+    duration: str,
+    after: str | None = None,
+    before: str | None = None,
+    calendarIds: list | None = None,
+    dayStart: str | None = None,
+    dayEnd: str | None = None,
+    includeWeekends: bool | None = None,
+    limit: int | None = None,
+) -> ToolResult:
+    """Find open slots on the user's calendars that are long enough for something.
+
+    Use this to answer "when am I free for X" or to pick a time before calling
+    create_event. To ask what is already scheduled, use search_events instead.
+
+    Openings are reported at their full length, not trimmed to 'duration', so a
+    two-hour gap is reported as two hours even when asked for one.
+
+    Not counted as busy: events marked free (TRANSP:TRANSPARENT), cancelled
+    events, and invitations the user declined. All-day events are also not
+    counted -- a birthday does not occupy the day -- but any that overlap the
+    search are listed separately so they can be taken into account.
+
+    Args:
+        duration: How long the slot needs to be, ISO 8601, e.g. "PT1H" or
+            "PT30M".
+        after: Earliest time to consider. ISO 8601 or a relative expression
+            ("today", "tomorrow", "2 weeks from now"). Defaults to now.
+        before: Latest time to consider. Same formats. Defaults to two weeks
+            from now.
+        calendarIds: Restrict to these calendars. Defaults to all of them.
+        dayStart: Earliest hour of day to offer, "HH:MM". Defaults to "09:00".
+            Pass "00:00" together with dayEnd "23:59" to search around the clock.
+        dayEnd: Latest hour of day to offer, "HH:MM". Defaults to "17:00".
+        includeWeekends: Offer Saturday and Sunday too. Defaults to false.
+        limit: Maximum number of openings to return (default 10, max 50).
+    """
+    error = _validate_limit(limit)
+    if error:
+        return _error_result(error)
+    effective_limit = DEFAULT_LIMIT if limit is None else limit
+
+    zone = local_zone()
+    now = datetime.now(zone)
+
+    try:
+        needed = parse_duration(duration)
+        if needed <= timedelta(0):
+            return _error_result("duration must be positive, for example \"PT1H\".")
+        start = parse_when(after, default=now, tz=zone)
+        end = parse_when(before, default=now + timedelta(days=14), tz=zone)
+        opens = _parse_clock(dayStart, clock_time(9, 0), "dayStart")
+        closes = _parse_clock(dayEnd, clock_time(17, 0), "dayEnd")
+    except DateError as exc:
+        return _error_result(str(exc))
+
+    if end <= start:
+        return _error_result(
+            f"The range is empty: 'before' ({end.isoformat()}) is not after "
+            f"'after' ({start.isoformat()})."
+        )
+    if closes <= opens:
+        return _error_result(
+            f"dayEnd ({closes.strftime('%H:%M')}) must be later than dayStart "
+            f"({opens.strftime('%H:%M')})."
+        )
+
+    weekdays = set(range(7)) if includeWeekends else set(range(5))
+
+    try:
+        calendars = await client().calendars()
+        if calendarIds:
+            wanted = {str(cid) for cid in calendarIds}
+            calendars = [cal for cal in calendars if cal.id in wanted]
+            if not calendars:
+                return _error_result(
+                    "None of those calendar ids exist. Call list_calendars to "
+                    "see the available ids."
+                )
+
+        events: list[dict[str, Any]] = []
+        for cal in calendars:
+            for resource in await client().query(cal, start=start, end=end):
+                try:
+                    for parsed in ical.parse_resource(resource.ics):
+                        events.append(
+                            ical.event_to_dict(
+                                parsed,
+                                calendar_id=resource.calendar_id,
+                                resource_name=resource.name,
+                                calendar_color=cal.color,
+                            )
+                        )
+                except ical.ICalError as exc:
+                    logger.warning("Skipping %s: %s", resource.url, exc)
+        identities = {a.removeprefix("mailto:").lower() for a in await client().identities()}
+    except (CalDavError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    busy, all_day = _busy_intervals(events, identities, zone)
+
+    try:
+        windows = availability.working_windows(
+            start, end, tz=zone, day_start=opens, day_end=closes, weekdays=weekdays
+        )
+        openings = availability.slots(windows, busy, needed, limit=effective_limit)
+    except ValueError as exc:
+        return _error_result(str(exc))
+
+    return _free_time_result(
+        openings, needed, all_day, zone, effective_limit, bool(includeWeekends)
+    )
+
+
+def _free_time_result(openings, needed, all_day, zone, limit, weekends) -> ToolResult:
+    items = [
+        {
+            "start": open_start.astimezone(zone).strftime("%Y-%m-%dT%H:%M:%S"),
+            "end": open_end.astimezone(zone).strftime("%Y-%m-%dT%H:%M:%S"),
+            "duration": format_duration(open_end - open_start),
+            "timeZone": str(zone),
+        }
+        for open_start, open_end in openings
+    ]
+
+    if not items:
+        text = (
+            f"No opening of at least {format_duration(needed)} in that range. "
+            "Widen the range, shorten the duration, or relax dayStart/dayEnd"
+            + ("" if weekends else " (weekends are excluded unless you ask for them)")
+            + "."
+        )
+    else:
+        lines = []
+        current_day = None
+        for open_start, open_end in openings:
+            local_start = open_start.astimezone(zone)
+            local_end = open_end.astimezone(zone)
+            day = local_start.strftime("%a %Y-%m-%d")
+            if day != current_day:
+                lines.append(day)
+                current_day = day
+            lines.append(
+                f"  {local_start.strftime('%H:%M')}-{local_end.strftime('%H:%M')}"
+                f"  ({format_duration(local_end - local_start)} free)"
+            )
+        text = (
+            f"{len(items)} opening(s) of at least {format_duration(needed)} "
+            f"({zone}):\n\n" + "\n".join(lines)
+        )
+
+    if all_day:
+        titles = sorted({event.get("title") or "(untitled)" for event in all_day})
+        text += (
+            "\n\nAll-day events in this range are not treated as busy: "
+            + ", ".join(titles)
+            + "."
+        )
+
+    return _result(
+        text,
+        {
+            "items": items,
+            "count": len(items),
+            "limit": limit,
+            "duration": format_duration(needed),
+            "timeZone": str(zone),
+            "allDayEvents": [
+                {"title": e.get("title"), "start": e.get("start"), "id": e.get("id")}
+                for e in all_day
+            ],
+        },
+    )
 
 
 @mcp.tool

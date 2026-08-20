@@ -120,7 +120,33 @@ def event_to_dict(
     if status:
         payload["status"] = status.lower()
 
+    # TRANSP is what an event says about whether it occupies the person, as
+    # opposed to merely sitting on the calendar. Availability depends on it,
+    # and it is cheap to carry.
+    payload["blocksTime"] = _blocks_time(event, status)
+
     return payload
+
+
+def _blocks_time(event: IEvent, status: str) -> bool:
+    """Whether the event itself claims to occupy the person.
+
+    Two things make an event not count, and both are properties of the event:
+
+    * ``TRANSP:TRANSPARENT`` -- it explicitly declares that it does not occupy
+      the person. This is the standard signal.
+    * ``STATUS:CANCELLED`` -- it is not happening.
+
+    Two further exclusions are deliberately *not* decided here, because they
+    are not properties of the event: whether an all-day event blocks the day is
+    policy, and whether the user declined depends on which addresses are
+    theirs. Both are the caller's to apply -- see ``server._busy_intervals``.
+    """
+    if status.upper() == "CANCELLED":
+        return False
+    if _text(event, "TRANSP").upper() == "TRANSPARENT":
+        return False
+    return True
 
 
 def recurrence_key(prop: Any) -> str:
