@@ -1,58 +1,49 @@
-"""The CalDAV client: discovery, calendar listing, queries, and writes.
-
-Everything Apple-specific is confined to this module. The shape of the protocol
-work follows what iCloud actually answered when probed:
-
-* ``OPTIONS`` on the principal advertises ``calendar-auto-schedule``, so the
-  server sends iMIP invitations itself when an event carries an ORGANIZER and
-  ATTENDEEs. We never speak SMTP.
-* ``calendar-query`` honors ``<C:expand>``, so recurring events come back as one
-  response per occurrence with a ``RECURRENCE-ID``. No local expansion is
-  needed, and no local cache either: measured against a calendar of several
-  thousand events, a two-week window answered in well under a second and a full
-  year in about twice that.
-* Text search cannot be combined with a time range: iCloud silently ignores
-  a ``prop-filter`` whenever a ``time-range`` is present, and rejects the
-  reversed order with a 412. Matching therefore happens above this layer.
-
-Discovery (principal -> calendar-home-set -> calendars) is cached for
-``_DISCOVERY_TTL`` because it costs two extra round trips and essentially never
-changes.
-"""
-
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.parse import urljoin
 
-import httpx
+from .dav import APPLE as ICAL_NS
+from .dav import CAL, DAV
+from .dav import DISCOVERY_TTL as _DISCOVERY_TTL
+from .dav import (
+    AuthError,
+    Conflict,
+    DavClient,
+    DavError,
+    NotFound,
+    Throttled,
+)
+from .dav import collection_id as _calendar_id
+from .dav import credentials_from_env, is_writable
+from .dav import resource_name as _resource_name
+from .dav import resource_url as _resource_url
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ROOT = "https://caldav.icloud.com"
-USER_AGENT = "calendar-mcp/0.1"
-_DISCOVERY_TTL = 300.0
 
-# iCloud starts answering 503 after a burst of writes. It clears on its own, so
-# a short retry turns a transient blip into a slow success.
-#
-# Deliberately brief. iCloud sends `Retry-After: 30` when it is throttling in
-# earnest, and honoring that literally makes a tool call hang for a minute and a
-# half -- far worse than failing in a couple of seconds with a message saying to
-# try again. Retry the blips; report the real throttling.
-_RETRY_STATUSES = (429, 503)
-_RETRY_BACKOFF = (1.0, 3.0)
-_RETRY_AFTER_CAP = 5.0
+# The HTTP plumbing -- auth, retries, throttling, error mapping -- lives in
+# dav.py, shared with the CardDAV client. Both speak to the same account and
+# hit the same walls, so a fix to either applies to both.
+CalDavError = DavError
 
-DAV = "{DAV:}"
-CAL = "{urn:ietf:params:xml:ns:caldav}"
-ICAL_NS = "{http://apple.com/ns/ical/}"
+__all__ = [
+    "AuthError",
+    "CalDavClient",
+    "CalDavError",
+    "Calendar",
+    "Conflict",
+    "DEFAULT_ROOT",
+    "NotFound",
+    "Resource",
+    "Throttled",
+    "client_from_env",
+]
 
 _PROPFIND_PRINCIPAL = (
     '<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/>'
@@ -72,26 +63,6 @@ _PROPFIND_CALENDARS = (
     "<c:supported-calendar-component-set/><i:calendar-color/>"
     "</d:prop></d:propfind>"
 )
-
-
-class CalDavError(Exception):
-    """A CalDAV request failed in a way the caller should surface."""
-
-
-class NotFound(CalDavError):
-    """The requested resource does not exist on the server."""
-
-
-class Conflict(CalDavError):
-    """The resource changed underneath us, or already existed when creating."""
-
-
-class AuthError(CalDavError):
-    """The Apple ID or app-specific password was rejected."""
-
-
-class Throttled(CalDavError):
-    """iCloud is refusing requests for now. Not a credential problem."""
 
 
 @dataclass(frozen=True)
@@ -121,7 +92,7 @@ class Resource:
     ics: str
 
 
-class CalDavClient:
+class CalDavClient(DavClient):
     """A thin async CalDAV client scoped to a single account."""
 
     def __init__(
@@ -132,115 +103,13 @@ class CalDavClient:
         root: str = DEFAULT_ROOT,
         timeout: float = 30.0,
     ):
-        if not username or not password:
-            raise ValueError("username and password are both required")
-        self._root = root.rstrip("/")
-        self._auth = httpx.BasicAuth(username, password)
-        self._timeout = timeout
-        self._client: httpx.AsyncClient | None = None
-
+        super().__init__(
+            username=username, password=password, root=root, timeout=timeout
+        )
         self._home: str | None = None
         self._addresses: tuple[str, ...] = ()
         self._calendars: list[Calendar] = []
         self._discovered_at = 0.0
-
-    # ------------------------------------------------------------------
-    # Plumbing
-    # ------------------------------------------------------------------
-
-    def _http(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                auth=self._auth,
-                timeout=self._timeout,
-                headers={"User-Agent": USER_AGENT},
-                follow_redirects=True,
-            )
-        return self._client
-
-    async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    async def _request(
-        self,
-        method: str,
-        url: str,
-        *,
-        body: str | None = None,
-        headers: dict[str, str] | None = None,
-        expect: tuple[int, ...] = (200, 207),
-    ) -> httpx.Response:
-        response = None
-        for attempt, pause in enumerate((*_RETRY_BACKOFF, None)):
-            try:
-                response = await self._http().request(
-                    method,
-                    url,
-                    content=body.encode("utf-8") if body else None,
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                raise CalDavError(f"{method} {url} failed: {exc}") from exc
-
-            if response.status_code not in _RETRY_STATUSES or pause is None:
-                break
-
-            # Honor Retry-After when iCloud bothers to send one.
-            delay = pause
-            retry_after = response.headers.get("Retry-After", "").strip()
-            if retry_after.isdigit():
-                delay = max(delay, min(float(retry_after), _RETRY_AFTER_CAP))
-            logger.warning(
-                "%s %s returned %s; retrying in %.0fs (attempt %d)",
-                method,
-                url,
-                response.status_code,
-                delay,
-                attempt + 1,
-            )
-            await asyncio.sleep(delay)
-
-        assert response is not None
-
-        if response.status_code in _RETRY_STATUSES:
-            raise Throttled(
-                f"iCloud is temporarily refusing requests ({response.status_code}) "
-                "and did not recover after several retries. This is rate limiting, "
-                "not a credential problem -- it usually clears within a few "
-                "minutes. Wait and try again."
-            )
-
-        if response.status_code in (401, 403):
-            raise AuthError(
-                "iCloud rejected the credentials. Check APPLE_ID and "
-                "APPLE_APP_PASSWORD -- the password must be an app-specific "
-                "password from appleid.apple.com, not the account password."
-            )
-        if response.status_code == 404:
-            raise NotFound(f"{url} does not exist")
-        if response.status_code in (409, 412):
-            raise Conflict(
-                f"{method} {url} was refused as a conflict ({response.status_code}); "
-                "the event changed on the server since it was read."
-            )
-        if response.status_code not in expect:
-            raise CalDavError(
-                f"{method} {url} returned {response.status_code}: "
-                f"{response.text[:400]}"
-            )
-        return response
-
-    async def _propfind(self, url: str, body: str, depth: str = "0") -> ET.Element:
-        response = await self._request(
-            "PROPFIND",
-            url,
-            body=body,
-            headers={"Depth": depth, "Content-Type": "application/xml; charset=utf-8"},
-            expect=(207,),
-        )
-        return ET.fromstring(response.text)
 
     # ------------------------------------------------------------------
     # Discovery
@@ -250,21 +119,12 @@ class CalDavClient:
         if not force and self._home and time.time() - self._discovered_at < _DISCOVERY_TTL:
             return
 
-        tree = await self._propfind(self._root + "/", _PROPFIND_PRINCIPAL)
-        href = tree.find(f".//{DAV}current-user-principal/{DAV}href")
-        if href is None or not href.text:
-            raise CalDavError(
-                "The server did not return a current-user-principal. This usually "
-                "means the Apple ID or app-specific password is wrong."
-            )
-        principal = urljoin(self._root + "/", href.text)
+        principal = await self._principal()
+        self._home = await self._home_set(
+            principal, _PROPFIND_HOME, f"{CAL}calendar-home-set"
+        )
 
         tree = await self._propfind(principal, _PROPFIND_HOME)
-        home_href = tree.find(f".//{CAL}calendar-home-set/{DAV}href")
-        if home_href is None or not home_href.text:
-            raise CalDavError("The server did not return a calendar-home-set.")
-        self._home = urljoin(principal, home_href.text)
-
         self._addresses = tuple(
             el.text.lower()
             for el in tree.findall(f".//{CAL}calendar-user-address-set/{DAV}href")
@@ -326,7 +186,7 @@ class CalDavClient:
                     color=_normalize_color(color_el.text if color_el is not None else ""),
                     url=url,
                     components=components,
-                    read_only=f"{DAV}write-content" not in privileges,
+                    read_only=not is_writable(privileges),
                 )
             )
 
@@ -452,14 +312,10 @@ class CalDavClient:
 
     async def get(self, calendar: Calendar, name: str) -> Resource:
         """Fetch one ``.ics`` resource unexpanded, with its ETag."""
-        url = _resource_url(calendar, name)
-        response = await self._request("GET", url, expect=(200,))
+        url = _resource_url(calendar.url, name)
+        etag, text = await self._get(url)
         return Resource(
-            calendar_id=calendar.id,
-            name=name,
-            url=url,
-            etag=response.headers.get("ETag", ""),
-            ics=response.text,
+            calendar_id=calendar.id, name=name, url=url, etag=etag, ics=text
         )
 
     # ------------------------------------------------------------------
@@ -481,53 +337,23 @@ class CalDavClient:
         fails instead of silently overwriting someone's event. Passing ``etag``
         sends ``If-Match`` so a concurrent edit fails instead of being clobbered.
         """
-        headers = {"Content-Type": "text/calendar; charset=utf-8"}
-        if create:
-            headers["If-None-Match"] = "*"
-        elif etag:
-            headers["If-Match"] = etag
-
-        url = _resource_url(calendar, name)
-        response = await self._request(
-            "PUT", url, body=ics, headers=headers, expect=(200, 201, 204)
+        return await self._put(
+            _resource_url(calendar.url, name),
+            ics,
+            "text/calendar; charset=utf-8",
+            etag=etag,
+            create=create,
         )
-        return response.headers.get("ETag", "")
 
     async def delete(
         self, calendar: Calendar, name: str, *, etag: str | None = None
     ) -> None:
-        headers = {"If-Match": etag} if etag else {}
-        await self._request(
-            "DELETE",
-            _resource_url(calendar, name),
-            headers=headers,
-            expect=(200, 204),
-        )
+        await self._delete(_resource_url(calendar.url, name), etag=etag)
 
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-
-def _calendar_id(url: str) -> str:
-    """The stable id for a calendar: the last path segment of its URL."""
-    return urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
-
-
-def _resource_url(calendar: Calendar, name: str) -> str:
-    return calendar.url.rstrip("/") + "/" + quote(name, safe="")
-
-
-def _resource_name(url: str) -> str:
-    """The decoded last path segment of a resource URL.
-
-    Hrefs come back percent-encoded, and plenty of real resources are named
-    after a UID containing an ``@`` (anything imported from Google is). Storing
-    the decoded name keeps the event id readable-ish and, more importantly,
-    keeps _resource_url from encoding an already-encoded name a second time.
-    """
-    return unquote(urlparse(url).path.rstrip("/").rsplit("/", 1)[-1])
 
 
 def _normalize_color(value: str | None) -> str:
@@ -563,19 +389,10 @@ def _parse_multistatus(xml: str, calendar: Calendar) -> list[Resource]:
 
 
 def client_from_env() -> CalDavClient:
-    """Build the account client from the environment.
+    """Build the CalDAV client from the environment."""
+    import os
 
-    ``APPLE_ID`` and ``APPLE_APP_PASSWORD`` match the names the proof-of-concept
-    script used, so an existing ``.env`` keeps working.
-    """
-    apple_id = os.environ.get("APPLE_ID", "").strip()
-    password = os.environ.get("APPLE_APP_PASSWORD", "").strip()
-    if not apple_id or not password:
-        raise ValueError(
-            "APPLE_ID and APPLE_APP_PASSWORD must be set. The password is an "
-            "app-specific password generated at appleid.apple.com, not the "
-            "Apple ID account password."
-        )
+    apple_id, password = credentials_from_env()
     return CalDavClient(
         username=apple_id,
         password=password,

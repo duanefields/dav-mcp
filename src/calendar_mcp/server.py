@@ -22,7 +22,7 @@ from pydantic import Field
 from fastmcp.tools.tool import ToolResult
 from starlette.responses import JSONResponse
 
-from . import availability, caldav, ical, ids
+from . import availability, caldav, carddav, ical, ids, vcard
 from .caldav import CalDavClient, CalDavError
 from .dates import (
     DateError,
@@ -47,6 +47,7 @@ DEFAULT_AFTER = "3 months ago"
 DEFAULT_BEFORE = "12 months from now"
 
 _client: CalDavClient | None = None
+_contacts: carddav.CardDavClient | None = None
 
 # Enough to tell "never wrote" from "wrote and it failed" on a headless host,
 # which is the same question things-mcp answers with last_write_dispatch.
@@ -64,6 +65,19 @@ def client() -> CalDavClient:
     if _client is None:
         _client = caldav.client_from_env()
     return _client
+
+
+def contacts() -> carddav.CardDavClient:
+    """The process-wide CardDAV client, built on first use.
+
+    Deliberately the same credentials as the calendar client -- one Apple ID
+    serves both -- but a separate connection, because they address different
+    hosts.
+    """
+    global _contacts
+    if _contacts is None:
+        _contacts = carddav.client_from_env()
+    return _contacts
 
 
 def _record_write(action: str, ok: bool, error: str | None = None) -> None:
@@ -1326,6 +1340,364 @@ async def delete_event(id: str) -> ToolResult:
         f"Cancelled the occurrence on {pretty}. The rest of the series is unchanged.",
         {"deleted": True, "occurrence": recurrence_id},
     )
+
+
+# ----------------------------------------------------------------------
+# Contacts
+# ----------------------------------------------------------------------
+
+
+def format_contact(contact: dict[str, Any]) -> str:
+    """Render one contact as the human-readable text channel."""
+    lines = [f"Name: {contact.get('name') or '(no name)'}"]
+
+    if contact.get("kind") == "group":
+        lines[0] += "  [group]"
+    if contact.get("organization"):
+        role = contact.get("jobTitle")
+        lines.append(f"Organization: {contact['organization']}" + (f" ({role})" if role else ""))
+
+    labeled = contact.get("labeled") or {}
+
+    def render(field: str, heading: str) -> None:
+        detailed = {entry["value"]: entry.get("label") for entry in labeled.get(field, [])}
+        for value in contact.get(field) or []:
+            label = detailed.get(value)
+            lines.append(f"{heading}: {value}" + (f"  ({label})" if label else ""))
+
+    render("emails", "Email")
+    render("phones", "Phone")
+    render("urls", "URL")
+
+    for address in contact.get("addresses") or []:
+        label = address.get("label")
+        lines.append(f"Address: {address['formatted']}" + (f"  ({label})" if label else ""))
+
+    if contact.get("birthday"):
+        lines.append(f"Birthday: {contact['birthday']}")
+    if contact.get("notes"):
+        collapsed = " ".join(contact["notes"].split())
+        lines.append(f"Notes: {collapsed[:300]}{'...' if len(collapsed) > 300 else ''}")
+
+    for key, values in (contact.get("other") or {}).items():
+        lines.append(f"{key}: {', '.join(values)}")
+
+    lines.append(f"ID: {contact.get('id')}")
+    return "\n".join(lines)
+
+
+async def _load_contact(contact_id: str):
+    """Resolve a contact id to ``(book, card, parsed)`` or raise."""
+    book_id, resource, _ = ids.decode(contact_id, kind="contact")
+    book = await contacts().address_book(book_id)
+    card = await contacts().get(book, resource)
+    return book, card, vcard.parse(card.vcard)
+
+
+@mcp.tool
+async def list_address_books() -> ToolResult:
+    """List the user's address books, with their ids.
+
+    Most iCloud accounts have exactly one. Use this only when a contact tool
+    needs an explicit addressBookId.
+    """
+    try:
+        books = await contacts().address_books()
+    except (carddav.CardDavError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    if not books:
+        return _error_result("The account has no address books.")
+
+    items = [
+        {"id": b.id, "name": b.name, "readOnly": b.read_only, "isDefault": i == 0}
+        for i, b in enumerate(books)
+    ]
+    text = "\n".join(
+        f"{b['name']} ({b['id']})" + (" [read-only]" if b["readOnly"] else "")
+        for b in items
+    )
+    return _result(text, {"items": items, "count": len(items)})
+
+
+@mcp.tool
+async def search_contacts(
+    query: str | None = None,
+    limit: int | None = None,
+    addressBookId: str | None = None,
+) -> ToolResult:
+    """Search the user's address book.
+
+    Returns contacts with everything on the card: name, email addresses, phone
+    numbers, postal addresses, organization, job title, birthday, notes and
+    URLs. Preferred entries come first, so emails[0] is the address to use
+    unless the user says otherwise.
+
+    Use this to turn a name into an email address before create_event, or into
+    a phone number or postal address.
+
+    Args:
+        query: Text to match against names, email addresses, phone numbers,
+            organizations, nicknames and notes. Omit to list the whole address
+            book, which is large -- always pass a query unless the user really
+            asked for everything.
+        limit: Maximum number of results (default 10, max 50).
+        addressBookId: Restrict to one address book. Defaults to all of them.
+    """
+    error = _validate_limit(limit)
+    if error:
+        return _error_result(error)
+    effective_limit = DEFAULT_LIMIT if limit is None else limit
+
+    needle = (query or "").strip()
+
+    try:
+        books = await contacts().address_books()
+        if addressBookId:
+            books = [b for b in books if b.id == addressBookId]
+            if not books:
+                return _error_result(
+                    f"No address book with id {addressBookId!r}. Call "
+                    "list_address_books to see the available ids."
+                )
+
+        found: list[dict[str, Any]] = []
+        for book in books:
+            for card in await contacts().search(book, needle or None):
+                try:
+                    found.append(
+                        vcard.to_dict(
+                            vcard.parse(card.vcard),
+                            book_id=card.book_id,
+                            resource_name=card.name,
+                        )
+                    )
+                except vcard.VCardError as exc:
+                    logger.warning("Skipping %s: %s", card.url, exc)
+    except (carddav.CardDavError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    found.sort(key=lambda c: (c.get("name") or "\uffff").lower())
+    total = len(found)
+    page = found[:effective_limit]
+
+    if not page:
+        text = (
+            f"No contacts matching {needle!r}."
+            if needle
+            else "No contacts found."
+        )
+    else:
+        header = f"Showing {len(page)} of {total} contacts\n\n" if total > len(page) else ""
+        text = header + "\n\n---\n\n".join(format_contact(c) for c in page)
+
+    return _result(
+        text,
+        {"items": page, "count": len(page), "total": total, "limit": effective_limit},
+    )
+
+
+@mcp.tool
+async def create_contact(
+    name: str,
+    emails: list | None = None,
+    phones: list | None = None,
+    organization: str | None = None,
+    birthday: str | None = None,
+    notes: str | None = None,
+    addressBookId: str | None = None,
+) -> ToolResult:
+    """Create a new contact in the address book. Returns the new contact's id.
+
+    Args:
+        name: Full name of the contact.
+        emails: Email addresses. The first becomes the preferred one.
+        phones: Phone numbers. The first becomes the preferred one.
+        organization: Company or organization name.
+        birthday: Birthday as an ISO date (YYYY-MM-DD). The year may be omitted
+            as "0000" (e.g. 0000-03-15) for a birthday whose year is unknown.
+        notes: Free-text notes about this contact.
+        addressBookId: Address book to add it to. Defaults to the first
+            writable one.
+    """
+    if not name or not name.strip():
+        return _error_result("name is required.")
+
+    emails = [str(e).strip() for e in (emails or []) if str(e).strip()]
+    phones = [str(p).strip() for p in (phones or []) if str(p).strip()]
+    bad = [e for e in emails if "@" not in e]
+    if bad:
+        return _error_result(
+            "These do not look like email addresses: " + ", ".join(repr(e) for e in bad) + "."
+        )
+
+    try:
+        book = (
+            await contacts().address_book(addressBookId)
+            if addressBookId
+            else await contacts().default_book()
+        )
+    except (carddav.CardDavError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    if book.read_only:
+        return _error_result(f"The address book {book.name!r} is read-only.")
+
+    uid = vcard.new_uid()
+    try:
+        body = vcard.build(
+            uid=uid,
+            name=name.strip(),
+            emails=emails,
+            phones=phones,
+            organization=(organization or "").strip(),
+            birthday=(birthday or "").strip(),
+            notes=(notes or "").strip(),
+        )
+    except (vcard.VCardError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    resource = f"{uid}.vcf"
+    try:
+        await contacts().put(book, resource, body, create=True)
+    except carddav.CardDavError as exc:
+        _record_write("create_contact", False, str(exc))
+        return _error_result(f"Could not create the contact: {exc}")
+
+    _record_write("create_contact", True)
+    payload = vcard.to_dict(vcard.parse(body), book_id=book.id, resource_name=resource)
+    return _result(
+        f"Created contact in {book.name}.\n\n{format_contact(payload)}",
+        {"id": payload["id"], "contact": payload},
+    )
+
+
+@mcp.tool
+async def update_contact(
+    id: str,
+    name: str | None = None,
+    addEmails: list | None = None,
+    removeEmails: list | None = None,
+    addPhones: list | None = None,
+    removePhones: list | None = None,
+    organization: str | None = None,
+    birthday: str | None = None,
+    notes: str | None = None,
+) -> ToolResult:
+    """Update fields on an existing contact.
+
+    Scalar fields (name, organization, notes, birthday) replace. Emails and
+    phones use add/remove deltas so a partial edit does not drop existing
+    entries. Use create_contact for new contacts.
+
+    Everything else on the card is preserved untouched, including photos,
+    social profiles, related names and any labels.
+
+    Args:
+        id: ID of the contact to update, as returned by search_contacts.
+        name: New full name.
+        addEmails: Email addresses to add. Duplicates are skipped.
+        removeEmails: Email addresses to remove, matched case-insensitively.
+            Entries that are not present are ignored.
+        addPhones: Phone numbers to add.
+        removePhones: Phone numbers to remove, matched exactly.
+        organization: Company or organization name. Empty string clears it.
+        birthday: Birthday as an ISO date (YYYY-MM-DD). Empty string clears it.
+        notes: Free-text notes, replacing what is there. Empty string clears it.
+    """
+    try:
+        book_id, resource, _ = ids.decode(id, kind="contact")
+    except ids.BadId as exc:
+        return _error_result(str(exc))
+
+    try:
+        book = await contacts().address_book(book_id)
+        if book.read_only:
+            return _error_result(f"The address book {book.name!r} is read-only.")
+        card = await contacts().get(book, resource)
+        parsed = vcard.parse(card.vcard)
+    except (carddav.CardDavError, vcard.VCardError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    if name is not None:
+        if not name.strip():
+            return _error_result("name cannot be empty.")
+        vcard.set_text(parsed, "FN", name.strip())
+    if organization is not None:
+        vcard.set_org(parsed, organization.strip())
+    if birthday is not None:
+        vcard.set_text(parsed, "BDAY", birthday.strip())
+    if notes is not None:
+        vcard.set_text(parsed, "NOTE", notes.strip())
+
+    added_emails = vcard.add_values(
+        parsed, "EMAIL", [str(e) for e in (addEmails or [])], ["INTERNET"]
+    )
+    removed_emails = vcard.remove_values(
+        parsed, "EMAIL", [str(e) for e in (removeEmails or [])]
+    )
+    added_phones = vcard.add_values(
+        parsed, "TEL", [str(p) for p in (addPhones or [])], ["CELL", "VOICE"]
+    )
+    removed_phones = vcard.remove_values(
+        parsed, "TEL", [str(p) for p in (removePhones or [])]
+    )
+
+    vcard.touch(parsed)
+
+    try:
+        await contacts().put(book, resource, parsed.serialize(), etag=card.etag)
+    except carddav.CardDavError as exc:
+        _record_write("update_contact", False, str(exc))
+        return _error_result(f"Could not update the contact: {exc}")
+
+    _record_write("update_contact", True)
+    payload = vcard.to_dict(parsed, book_id=book.id, resource_name=resource)
+    return _result(
+        f"Updated contact.\n\n{format_contact(payload)}",
+        {
+            "contact": payload,
+            "addedEmails": added_emails,
+            "removedEmails": removed_emails,
+            "addedPhones": added_phones,
+            "removedPhones": removed_phones,
+        },
+    )
+
+
+@mcp.tool
+async def delete_contact(id: str) -> ToolResult:
+    """Delete a contact from the address book.
+
+    Args:
+        id: The contact ID to delete, as returned by search_contacts.
+    """
+    try:
+        book_id, resource, _ = ids.decode(id, kind="contact")
+    except ids.BadId as exc:
+        return _error_result(str(exc))
+
+    try:
+        book = await contacts().address_book(book_id)
+        if book.read_only:
+            return _error_result(f"The address book {book.name!r} is read-only.")
+    except (carddav.CardDavError, ValueError) as exc:
+        return _error_result(str(exc))
+
+    try:
+        await contacts().delete(book, resource)
+    except carddav.NotFound:
+        _record_write("delete_contact", True)
+        return _result(
+            "That contact no longer exists; nothing to delete.",
+            {"deleted": False, "reason": "not-found"},
+        )
+    except carddav.CardDavError as exc:
+        _record_write("delete_contact", False, str(exc))
+        return _error_result(f"Could not delete the contact: {exc}")
+
+    _record_write("delete_contact", True)
+    return _result("Deleted the contact.", {"deleted": True})
 
 
 # ----------------------------------------------------------------------

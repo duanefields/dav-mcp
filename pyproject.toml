@@ -20,6 +20,7 @@ dependencies = [
     "fastmcp>=3.0.0,<4",
     "icalendar>=6.1",
     "tzdata>=2024.1",
+    "vobject>=0.9.9",
 ]
 
 [project.optional-dependencies]

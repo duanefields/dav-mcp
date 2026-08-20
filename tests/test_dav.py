@@ -1,25 +1,24 @@
-"""CalDAV transport behavior, against a mocked HTTP layer.
+"""Shared WebDAV transport behavior, against a mocked HTTP layer.
 
 No socket is opened. What is pinned here is how the client reacts to the
 responses iCloud actually returns -- particularly the throttling that shows up
 after a burst of writes and looks like nothing else.
+
+This covers ``dav.DavClient``, which both the CalDAV and CardDAV clients extend,
+so a regression here would break contacts and calendar alike.
 """
 
 import httpx
 import pytest
 
-from calendar_mcp.caldav import (
-    AuthError,
-    CalDavClient,
-    CalDavError,
-    NotFound,
-    Throttled,
-)
+from calendar_mcp.dav import AuthError, DavClient, DavError, NotFound, Throttled
 
 
 def client(handler):
     """A client whose transport is a scripted handler."""
-    c = CalDavClient(username="me@example.com", password="app-specific")
+    c = DavClient(
+        username="me@example.com", password="app-specific", root="https://x"
+    )
     c._client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), headers={"User-Agent": "test"}
     )
@@ -28,7 +27,7 @@ def client(handler):
 
 class TestThrottling:
     async def test_a_503_is_retried_and_can_succeed(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.caldav._RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         calls = []
 
         def handler(request):
@@ -46,7 +45,7 @@ class TestThrottling:
     ):
         # The failure this message exists for: a burst of writes gets the
         # account throttled, and "503" alone reads like the server is broken.
-        monkeypatch.setattr("calendar_mcp.caldav._RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         with pytest.raises(Throttled) as excinfo:
             await client(lambda request: httpx.Response(503))._request(
                 "PROPFIND", "https://x/", expect=(207,)
@@ -56,7 +55,7 @@ class TestThrottling:
         assert "not a credential problem" in message
 
     async def test_a_429_is_treated_the_same_way(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.caldav._RETRY_BACKOFF", (0,))
+        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0,))
         with pytest.raises(Throttled):
             await client(lambda request: httpx.Response(429))._request(
                 "PROPFIND", "https://x/", expect=(207,)
@@ -68,8 +67,8 @@ class TestThrottling:
         async def fake_sleep(seconds):
             slept.append(seconds)
 
-        monkeypatch.setattr("calendar_mcp.caldav.asyncio.sleep", fake_sleep)
-        monkeypatch.setattr("calendar_mcp.caldav._RETRY_BACKOFF", (1.0,))
+        monkeypatch.setattr("calendar_mcp.dav.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (1.0,))
         with pytest.raises(Throttled):
             await client(
                 lambda request: httpx.Response(503, headers={"Retry-After": "9999"})
@@ -86,7 +85,7 @@ class TestThrottling:
         async def fake_sleep(seconds):
             slept.append(seconds)
 
-        monkeypatch.setattr("calendar_mcp.caldav.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("calendar_mcp.dav.asyncio.sleep", fake_sleep)
         with pytest.raises(Throttled):
             await client(
                 lambda request: httpx.Response(503, headers={"Retry-After": "30"})
@@ -94,14 +93,14 @@ class TestThrottling:
         assert sum(slept) <= 10.0
 
     async def test_an_ordinary_error_is_not_retried(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.caldav._RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         calls = []
 
         def handler(request):
             calls.append(request)
             return httpx.Response(500, text="boom")
 
-        with pytest.raises(CalDavError):
+        with pytest.raises(DavError):
             await client(handler)._request("PROPFIND", "https://x/", expect=(207,))
         assert len(calls) == 1
 

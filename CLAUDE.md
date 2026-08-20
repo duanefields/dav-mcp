@@ -36,6 +36,10 @@ touches a real iCloud account.
 An MCP server that bridges a model to Apple iCloud Calendar over CalDAV. Layered
 so that each file has exactly one thing that can go wrong in it:
 
+0. **src/calendar_mcp/dav.py** — HTTP plumbing shared by both protocols: auth,
+   retries, throttling, error mapping, the principal→home discovery walk, and
+   resource GET/PUT/DELETE. Both clients extend `DavClient`, so a fix here
+   applies to calendar and contacts alike.
 1. **src/calendar_mcp/caldav.py** — the protocol. Discovery (principal →
    calendar-home-set → calendars, cached 300s), `calendar-query` REPORTs,
    `GET`/`PUT`/`DELETE` of `.ics` resources. Everything Apple-specific lives
@@ -50,7 +54,12 @@ so that each file has exactly one thing that can go wrong in it:
    expressions) and ISO 8601 duration conversion.
 5. **src/calendar_mcp/server.py** — the tools, the `/health` route, and
    transport selection in `main()`.
-6. **src/calendar_mcp/availability.py** — interval arithmetic for
+6. **src/calendar_mcp/carddav.py** — CardDAV protocol: address book discovery,
+   `addressbook-query` search, resource writes.
+7. **src/calendar_mcp/vcard.py** — vCard ↔ dict, via `vobject`. Reading is
+   lossy by design (photos and internal properties are not reported); **writing
+   is not** — see below.
+8. **src/calendar_mcp/availability.py** — interval arithmetic for
    `find_free_time`: merge, invert, per-day working windows, slot search. Pure
    functions over aware datetimes, so it is tested without a network or a
    clock. Which events *count* as busy is decided in `server._busy_intervals`,
@@ -78,6 +87,32 @@ so that each file has exactly one thing that can go wrong in it:
 - Editing one occurrence of a series adds a second VEVENT with a
   `RECURRENCE-ID` to the same resource; cancelling one adds an `EXDATE` to the
   master rather than deleting the resource.
+
+## Contacts: never rebuild a card
+
+`update_contact` mutates the parsed vCard in place. It must stay that way.
+
+A real contact carried `PHOTO`, three `X-SOCIALPROFILE` entries, two
+`X-ABRELATEDNAMES` (Brother, Father), `X-ADDRESSBOOKSERVER-PHONEME-DATA`,
+`X-IMAGEHASH` and more — none of which the tool surface models. Rebuilding a
+card from `to_dict` output would delete every one of them, silently, on an edit
+as small as fixing a typo in a name. `tests/test_vcard.py` pins this.
+
+Apple's own conventions that the parser handles, all seen on real cards:
+
+- Labels live in a companion `itemN.X-ABLabel`, wrapped as `_$!<Work>!$_` for
+  built-ins and left bare for user-defined ones (`Google Voice`).
+- **Not every grouped property has a label.** A real `item4.ADR` was grouped
+  only with `item4.X-ABADR` (a country code), so a group with no label must
+  still fall back to `TYPE`.
+- `type=pref` marks the preferred value, as repeated `type=` params rather than
+  a comma-separated list. Preferred entries are returned first so `emails[0]`
+  is the right one.
+- A street can be genuinely multi-line (`\n`-escaped). The structured `street`
+  keeps the break for a mailing label; `formatted` must not, since it is meant
+  for a single field such as an event location.
+- `vobject` serializes property names upper-cased (`X-ABLABEL`). Verified live
+  that iCloud accepts this and labels survive the round trip.
 
 ## Working with iCloud
 

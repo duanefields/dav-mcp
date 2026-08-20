@@ -890,3 +890,189 @@ class TestWhatCountsAsBusy:
         assert result.structured_content["allDayEvents"][0]["title"] == "First Day of School"
         assert "not treated as busy" in text_of(result)
         assert "First Day of School" in text_of(result)
+
+
+# ----------------------------------------------------------------------
+# Contacts
+# ----------------------------------------------------------------------
+
+from calendar_mcp.carddav import AddressBook, Card
+from calendar_mcp.carddav import NotFound as CardNotFound
+
+BOOK = AddressBook(id="card", name="Contacts", url="https://example.invalid/card/", read_only=False)
+BOOK_RO = AddressBook(id="ro", name="Shared", url="https://example.invalid/ro/", read_only=True)
+
+CONTACT = """BEGIN:VCARD\r
+VERSION:3.0\r
+N:Collier;Andrew;;;\r
+FN:Andrew Collier\r
+EMAIL;type=INTERNET;type=HOME;type=pref:andrew@example.com\r
+item1.EMAIL;type=INTERNET:a.collier@work.example\r
+item1.X-ABLabel:_$!<Work>!$_\r
+TEL;type=CELL;type=pref:(555) 010-0100\r
+ORG:Acme;\r
+X-SOCIALPROFILE;type=linkedin:https://linkedin.example/in/ac\r
+UID:CONTACT-1\r
+END:VCARD\r
+"""
+
+
+def card(uid="CONTACT-1", body=CONTACT):
+    return Card(book_id=BOOK.id, name=f"{uid}.vcf", url=f"{BOOK.url}{uid}.vcf",
+                etag='"c-etag"', vcard=body)
+
+
+@pytest.fixture
+def cards():
+    fake = AsyncMock()
+    fake.address_books = AsyncMock(return_value=[BOOK])
+    fake.address_book = AsyncMock(return_value=BOOK)
+    fake.default_book = AsyncMock(return_value=BOOK)
+    fake.search = AsyncMock(return_value=[card()])
+    fake.get = AsyncMock(return_value=card())
+    fake.put = AsyncMock(return_value='"new"')
+    fake.delete = AsyncMock(return_value=None)
+    with patch.object(server, "contacts", return_value=fake):
+        yield fake
+
+
+def contact_id(uid="CONTACT-1"):
+    return ids.encode(BOOK.id, f"{uid}.vcf")
+
+
+class TestSearchContacts:
+    async def test_returns_the_contact_with_every_way_to_reach_them(self, cards):
+        result = await server.search_contacts(query="Collier")
+        item = result.structured_content["items"][0]
+        assert item["name"] == "Andrew Collier"
+        assert item["emails"] == ["andrew@example.com", "a.collier@work.example"]
+        assert item["phones"] == ["(555) 010-0100"]
+        assert item["organization"] == "Acme"
+
+    async def test_the_query_reaches_the_server(self, cards):
+        # Server-side filtering matters: the real book has 900+ cards.
+        await server.search_contacts(query="Collier")
+        assert cards.search.await_args.args[1] == "Collier"
+
+    async def test_an_omitted_query_lists_everything(self, cards):
+        await server.search_contacts()
+        assert cards.search.await_args.args[1] is None
+
+    async def test_labels_are_rendered_in_the_text_channel(self, cards):
+        assert "(Work)" in text_of(await server.search_contacts(query="Collier"))
+
+    async def test_no_match_says_so_rather_than_erroring(self, cards):
+        cards.search.return_value = []
+        result = await server.search_contacts(query="nobody")
+        assert "error" not in result.structured_content
+        assert "No contacts matching" in text_of(result)
+
+    async def test_an_unreadable_card_does_not_sink_the_search(self, cards):
+        cards.search.return_value = [card("BAD", "not a vcard at all"), card()]
+        items = (await server.search_contacts(query="x")).structured_content["items"]
+        assert [i["name"] for i in items] == ["Andrew Collier"]
+
+    @pytest.mark.parametrize("limit", [0, -1, 51])
+    async def test_out_of_bounds_limits_are_refused(self, cards, limit):
+        assert "error" in (await server.search_contacts(limit=limit)).structured_content
+
+    async def test_an_unknown_address_book_names_the_way_out(self, cards):
+        result = await server.search_contacts(addressBookId="nope")
+        assert "list_address_books" in text_of(result)
+
+
+class TestCreateContact:
+    async def test_writes_once_and_returns_a_usable_id(self, cards):
+        result = await server.create_contact(name="Jane Doe", emails=["jane@example.com"])
+        cards.put.assert_awaited_once()
+        book_id, resource, _ = ids.decode(result.structured_content["id"], kind="contact")
+        assert book_id == BOOK.id and resource.endswith(".vcf")
+
+    async def test_creates_with_if_none_match(self, cards):
+        await server.create_contact(name="Jane Doe")
+        assert cards.put.await_args.kwargs["create"] is True
+
+    async def test_the_first_email_becomes_preferred(self, cards):
+        await server.create_contact(
+            name="Jane Doe", emails=["first@example.com", "second@example.com"]
+        )
+        body = cards.put.await_args.args[2]
+        assert "pref" in body.split("first@example.com")[0].splitlines()[-1]
+
+    async def test_an_empty_name_is_refused(self, cards):
+        assert "name is required" in text_of(await server.create_contact(name="  "))
+        cards.put.assert_not_awaited()
+
+    async def test_something_that_is_not_an_email_is_refused(self, cards):
+        result = await server.create_contact(name="Jane", emails=["not-an-address"])
+        assert "do not look like email addresses" in text_of(result)
+        cards.put.assert_not_awaited()
+
+    async def test_a_read_only_book_is_refused_before_writing(self, cards):
+        cards.address_book.return_value = BOOK_RO
+        result = await server.create_contact(name="Jane", addressBookId=BOOK_RO.id)
+        assert "read-only" in text_of(result)
+        cards.put.assert_not_awaited()
+
+
+class TestUpdateContact:
+    async def test_writes_with_if_match(self, cards):
+        await server.update_contact(id=contact_id(), name="Andrew C.")
+        assert cards.put.await_args.kwargs["etag"] == '"c-etag"'
+
+    async def test_unmodelled_properties_survive(self, cards):
+        # The whole reason updates mutate rather than rebuild.
+        await server.update_contact(id=contact_id(), organization="New Co")
+        body = cards.put.await_args.args[2]
+        assert "X-SOCIALPROFILE" in body
+        assert "linkedin.example/in/ac" in body
+
+    async def test_email_deltas_are_reported(self, cards):
+        result = await server.update_contact(
+            id=contact_id(),
+            addEmails=["new@example.com"],
+            removeEmails=["ANDREW@EXAMPLE.COM"],
+        )
+        sc = result.structured_content
+        assert sc["addedEmails"] == ["new@example.com"]
+        assert sc["removedEmails"] == ["andrew@example.com"]
+
+    async def test_an_empty_string_clears_a_field(self, cards):
+        await server.update_contact(id=contact_id(), organization="")
+        assert "ORG" not in cards.put.await_args.args[2]
+
+    async def test_an_empty_name_is_refused(self, cards):
+        assert "cannot be empty" in text_of(
+            await server.update_contact(id=contact_id(), name="   ")
+        )
+
+    async def test_a_hand_written_id_points_at_the_contact_tool(self, cards):
+        result = await server.update_contact(id="contact-42", name="x")
+        assert "search_contacts" in text_of(result)
+        assert "search_events" not in text_of(result)
+
+
+class TestDeleteContact:
+    async def test_deleting_removes_the_card(self, cards):
+        result = await server.delete_contact(id=contact_id())
+        cards.delete.assert_awaited_once()
+        assert result.structured_content["deleted"] is True
+
+    async def test_an_already_deleted_contact_is_not_an_error(self, cards):
+        cards.delete.side_effect = CardNotFound("gone")
+        result = await server.delete_contact(id=contact_id())
+        assert "error" not in result.structured_content
+        assert result.structured_content["reason"] == "not-found"
+
+    async def test_a_read_only_book_is_refused(self, cards):
+        cards.address_book.return_value = BOOK_RO
+        result = await server.delete_contact(id=ids.encode(BOOK_RO.id, "x.vcf"))
+        assert "read-only" in text_of(result)
+        cards.delete.assert_not_awaited()
+
+
+class TestListAddressBooks:
+    async def test_lists_id_and_name(self, cards):
+        result = await server.list_address_books()
+        assert result.structured_content["items"][0]["id"] == "card"
+        assert "Contacts (card)" in text_of(result)

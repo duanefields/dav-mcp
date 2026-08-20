@@ -1,6 +1,7 @@
 # calendar-mcp
 
-An MCP server for Apple iCloud Calendar, over CalDAV.
+An MCP server for Apple iCloud **Calendar and Contacts**, over CalDAV and
+CardDAV. One Apple ID, one app-specific password, one endpoint.
 
 It exposes the same calendar surface the Fastmail MCP server does — list, search,
 create, update, delete, RSVP — so a model that has driven one can drive the other
@@ -22,6 +23,11 @@ and it needs none of the macOS privacy grants that an EventKit-based server does
 | `delete_event` | Delete an event. Given an occurrence id, cancels that occurrence and leaves the series intact. |
 | `rsvp_event` | Respond to an invitation: accepted, tentative or declined. |
 | `find_free_time` | Find openings long enough for something, honoring working hours and what actually counts as busy. |
+| `search_contacts` | Name, email, phone or organization → contacts with every way of reaching them. |
+| `create_contact` | Add a contact. |
+| `update_contact` | Change a contact. Emails and phones use add/remove deltas. |
+| `delete_contact` | Remove a contact. |
+| `list_address_books` | Address book ids. Most accounts have exactly one. |
 
 `GET /health` is served unauthenticated alongside them, for monitoring.
 
@@ -134,8 +140,8 @@ Bind to localhost and put a tunnel or reverse proxy in front of it. See
 
 ## Notes on iCloud
 
-Four findings that shaped the implementation, each verified against a live
-account rather than taken from the spec:
+Findings that shaped the implementation, each verified against a live account
+rather than taken from the spec:
 
 - **Recurrence is expanded server-side.** `calendar-query` honors `<C:expand>`,
   so occurrences arrive individually with their own `RECURRENCE-ID`. There is no
@@ -152,6 +158,19 @@ account rather than taken from the spec:
   `calendar-auto-schedule`, so an ORGANIZER plus ATTENDEEs on a PUT is all it
   takes to send invitations, and changing your own `PARTSTAT` is all it takes to
   reply.
+- **CardDAV under-reports, where CalDAV over-reported.** The address book's
+  `supported-report-set` lists only `addressbook-multiget` and
+  `sync-collection` — yet `addressbook-query` works and genuinely filters (1
+  match out of 913 cards). Believing the advertisement would have meant
+  downloading the whole book to filter locally. The rule for iCloud is to test
+  the behavior, in either direction.
+- **A contact card carries far more than any tool surface models** — photos,
+  social profiles, related names, Apple's own bookkeeping. So `update_contact`
+  mutates the parsed card in place and never rebuilds it from a dict, which
+  would silently delete all of that.
+- **Writability is reported differently per protocol**: calendars come back
+  with the `write-content` privilege, address books with plain `write`.
+  Checking only one marks the other read-only and refuses every write.
 
 ## Development
 
