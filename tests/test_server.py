@@ -404,13 +404,13 @@ class TestCreateWithParticipants:
         assert people["me@example.com"]["roles"] == {"owner": True}
         assert people["jo@example.org"]["status"] == "needs-action"
 
-    async def test_the_reply_says_mail_went_out_rather_than_implying_silence(self, caldav):
+    async def test_it_names_the_organizer_and_the_invitee(self, caldav):
         result = await server.create_event(
             title="Book Club",
             start="2026-09-03T19:00:00",
             participants=[{"email": "jo@example.org"}],
         )
-        assert "sent invitations" in text_of(result)
+        assert "me@example.com" in text_of(result)
         assert result.structured_content["invited"] == ["jo@example.org"]
 
     async def test_an_event_with_no_participants_gets_no_organizer(self, caldav):
@@ -503,13 +503,12 @@ def meeting(caldav, uid="u1", partstat="NEEDS-ACTION"):
 
 
 class TestUpdateParticipants:
-    async def test_adding_an_invitee_reports_who_was_mailed(self, caldav):
+    async def test_adding_an_invitee_records_who_was_added(self, caldav):
         result = await server.update_event(
             id=meeting(caldav), addParticipants=[{"name": "Sam", "email": "sam@example.net"}]
         )
         assert "sam@example.net" in body_of(caldav)
         assert result.structured_content["invited"] == ["sam@example.net"]
-        assert "Invitations sent to" in text_of(result)
 
     async def test_someone_already_invited_is_not_invited_twice(self, caldav):
         result = await server.update_event(
@@ -638,3 +637,85 @@ class TestRsvp:
         caldav.get = AsyncMock(return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics))
         result = await server.rsvp_event(id=ids.encode(PERSONAL.id, "u1.ics"), status="accepted")
         assert result.structured_content["respondedAs"] == "me@example.net"
+
+
+class TestDeliveryReporting:
+    """iCloud stamps SCHEDULE-STATUS on each attendee after trying to deliver.
+
+    Reading it back is what separates "we sent it" from "we asked iCloud to
+    send it and it bounced". Claiming the former when the latter happened is
+    worse than saying nothing: the user stops chasing an invitation that never
+    arrived. Observed live: 1.1 to a real mailbox, 5.1 to one that refused.
+    """
+
+    def scheduled(self, caldav, status):
+        """Make the read-back return an attendee carrying `status`."""
+        line = "ATTENDEE;CN=Jo;PARTSTAT=NEEDS-ACTION;EMAIL=jo@example.org"
+        if status:
+            line += f";SCHEDULE-STATUS={status}"
+        ics = "\r\n".join([
+            "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", "UID:u1",
+            "SUMMARY:Book Club",
+            "DTSTART;TZID=America/Chicago:20260903T190000",
+            "DTEND;TZID=America/Chicago:20260903T200000",
+            "ORGANIZER;EMAIL=me@example.com:mailto:me@example.com",
+            f"{line}:mailto:jo@example.org",
+            "END:VEVENT", "END:VCALENDAR", "",
+        ])
+        caldav.get = AsyncMock(
+            return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics)
+        )
+
+    async def test_a_delivered_invitation_is_reported_as_delivered(self, caldav):
+        self.scheduled(caldav, "1.1")
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert "delivered invitations to jo@example.org" in text_of(result)
+        assert result.structured_content["undelivered"] == []
+
+    async def test_a_failed_delivery_is_reported_as_a_failure(self, caldav):
+        # The live case: maildrop.cc refused the message and iCloud said 5.1,
+        # while the tool cheerfully claimed the invitation had been sent.
+        self.scheduled(caldav, "5.1")
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert "COULD NOT deliver" in text_of(result)
+        assert "have not been told" in text_of(result)
+        assert result.structured_content["undelivered"] == ["jo@example.org (5.1)"]
+
+    async def test_an_invalid_calendar_user_is_also_a_failure(self, caldav):
+        self.scheduled(caldav, "3.7")
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert result.structured_content["undelivered"] == ["jo@example.org (3.7)"]
+
+    async def test_no_status_yet_is_reported_as_pending_not_as_success(self, caldav):
+        self.scheduled(caldav, "")
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert "pending" in text_of(result)
+        assert result.structured_content["undelivered"] == []
+
+    async def test_a_read_back_failure_does_not_fail_the_write(self, caldav):
+        # The event exists either way; losing the receipt must not report the
+        # create as broken.
+        caldav.get = AsyncMock(side_effect=NotFound("gone"))
+        result = await server.create_event(
+            title="Book Club", start="2026-09-03T19:00:00",
+            participants=[{"email": "jo@example.org"}],
+        )
+        assert "error" not in result.structured_content
+        assert result.structured_content["id"]
+
+    async def test_no_extra_read_when_there_are_no_participants(self, caldav):
+        caldav.get = AsyncMock()
+        await server.create_event(title="Dentist", start="2026-09-03T10:00:00")
+        caldav.get.assert_not_awaited()

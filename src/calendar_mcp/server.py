@@ -230,6 +230,67 @@ def _clean_participants(participants: list | None) -> tuple[list[dict], str | No
     return unique, None
 
 
+async def _delivery_report(target, resource_name: str) -> dict[str, str]:
+    """Read back what iCloud managed to deliver, per attendee.
+
+    iCloud stamps ``SCHEDULE-STATUS`` on each ATTENDEE after it attempts
+    delivery (RFC 6638). Without reading it back, a write that iCloud accepted
+    and then failed to deliver is indistinguishable from a successful one, and
+    reporting "invitations sent" for a message that bounced is worse than
+    saying nothing -- the user stops chasing an invitation that never arrived.
+
+    Costs one extra GET, and only on writes that touch participants.
+    """
+    try:
+        resource = await client().get(target, resource_name)
+        event = ical.parse_resource(resource.ics)[0]
+    except (CalDavError, ical.ICalError, ValueError) as exc:
+        logger.warning("Could not read back delivery status: %s", exc)
+        return {}
+
+    report: dict[str, str] = {}
+    for attendee in ical.attendees_of(event):
+        email = ical._address_email(attendee)
+        status = str(attendee.params.get("SCHEDULE-STATUS", "")).strip()
+        if email and status:
+            report[email.lower()] = status
+    return report
+
+
+def _describe_delivery(emails: list[str], report: dict[str, str]) -> tuple[str, list[str]]:
+    """Turn a delivery report into a sentence. Returns ``(text, failed)``.
+
+    Anything in the 1.x family means iCloud sent or delivered it. 3.x and 5.x
+    are failures -- an unroutable address, or a recipient whose mail server
+    refused the message.
+    """
+    delivered, failed, unknown = [], [], []
+    for email in emails:
+        status = report.get(email.lower(), "")
+        code = status.split(";")[0].strip()
+        if not code:
+            unknown.append(email)
+        elif code.startswith("1."):
+            delivered.append(email)
+        else:
+            failed.append(f"{email} ({code})")
+
+    parts = []
+    if delivered:
+        parts.append("iCloud delivered invitations to " + ", ".join(delivered) + ".")
+    if failed:
+        parts.append(
+            "iCloud COULD NOT deliver to " + ", ".join(failed) + " -- they have "
+            "not been told about this event. Check the address."
+        )
+    if unknown:
+        parts.append(
+            "Delivery to " + ", ".join(unknown) + " is still pending; iCloud "
+            "reported no status yet."
+        )
+    return " ".join(parts), failed
+
+
 async def _resolve_organizer(requested: str | None) -> tuple[str, str | None]:
     """Pick the address to organize from. Returns ``(email, error)``.
 
@@ -566,15 +627,22 @@ async def create_event(
         calendar_color=target.color,
     )
     headline = f"Created event in {target.name}."
+    failed: list[str] = []
     if people:
-        headline += (
-            f" iCloud has sent invitations from {organizer_email} to "
-            + ", ".join(person["email"] for person in people)
-            + "."
+        emails = [person["email"] for person in people]
+        sentence, failed = _describe_delivery(
+            emails, await _delivery_report(target, name)
         )
+        headline += f" Organized by {organizer_email}. {sentence}"
+
     return _result(
         f"{headline}\n\n{format_event(payload)}",
-        {"id": event_id, "event": payload, "invited": [p["email"] for p in people]},
+        {
+            "id": event_id,
+            "event": payload,
+            "invited": [p["email"] for p in people],
+            "undelivered": failed,
+        },
     )
 
 
@@ -783,8 +851,12 @@ async def update_event(
     )
 
     headline = "Updated event."
+    failed: list[str] = []
     if invited:
-        headline += " Invitations sent to " + ", ".join(invited) + "."
+        sentence, failed = _describe_delivery(
+            invited, await _delivery_report(target, resource_name)
+        )
+        headline += f" {sentence}"
     if uninvited:
         headline += " Cancellations sent to " + ", ".join(uninvited) + "."
     if payload["participants"] and not (invited or uninvited):
@@ -794,7 +866,12 @@ async def update_event(
 
     return _result(
         f"{headline}\n\n{format_event(payload)}",
-        {"event": payload, "invited": invited, "uninvited": uninvited},
+        {
+            "event": payload,
+            "invited": invited,
+            "uninvited": uninvited,
+            "undelivered": failed,
+        },
     )
 
 

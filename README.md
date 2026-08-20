@@ -41,6 +41,11 @@ Two consequences worth knowing before wiring this to a model:
   calendar-user-addresses. iCloud accepts a PUT naming a foreign organizer and
   then silently sends nothing, which is indistinguishable from success — so
   `from` is validated against the account's real identities before writing.
+- **Sending is not the same as delivering.** After a write that touches
+  participants, the event is re-read and iCloud's per-attendee
+  `SCHEDULE-STATUS` is reported: who it reached, and who it did not. An address
+  whose mail server refuses the message comes back `5.1`, and the tool says so
+  rather than claiming the invitation was sent.
 
 ## Setup
 
