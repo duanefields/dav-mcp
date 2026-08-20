@@ -124,3 +124,17 @@ this code:
 - The organizer is also an attendee with `PARTSTAT=ACCEPTED`, and is never
   removable via `removeParticipants` — dropping them orphans the event for
   everyone else.
+
+### Confirming mail actually went out
+
+iCloud stamps each ATTENDEE with `SCHEDULE-STATUS` after it tries to deliver
+(RFC 6638). Re-`GET` the resource after a write and read it: `1.1` means
+delivered, `5.1`/`5.2` mean it could not be. This is the only way to tell a
+successful send from a PUT that iCloud accepted and then quietly did nothing,
+which is exactly what happens when the ORGANIZER is not one of the account's
+own addresses.
+
+Note iCloud rewrites the ORGANIZER and the account's own ATTENDEE line into an
+internal principal-URL form (`…/principal/`) rather than `mailto:`. Addresses
+are still readable because `ical._address_email` prefers the `EMAIL` parameter
+and only falls back to the value — do not reverse that order.
