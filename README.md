@@ -3,7 +3,7 @@
 An MCP server for Apple iCloud Calendar, over CalDAV.
 
 It exposes the same calendar surface the Fastmail MCP server does — list, search,
-create, update, delete — so a model that has driven one can drive the other
+create, update, delete, RSVP — so a model that has driven one can drive the other
 without relearning field names. It runs over stdio locally, or over authenticated
 HTTP for a remote client such as a Claude connector.
 
@@ -109,7 +109,7 @@ Bind to localhost and put a tunnel or reverse proxy in front of it. See
 
 ## Notes on iCloud
 
-Three findings that shaped the implementation, each verified against a live
+Four findings that shaped the implementation, each verified against a live
 account rather than taken from the spec:
 
 - **Recurrence is expanded server-side.** `calendar-query` honors `<C:expand>`,
