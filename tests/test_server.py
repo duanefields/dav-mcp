@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from calendar_mcp import ids, server
-from calendar_mcp.caldav import AuthError, Calendar, NotFound, Resource
+from dav_mcp import ids, server
+from dav_mcp.caldav import AuthError, Calendar, NotFound, Resource
 
 PERSONAL = Calendar(
     id="CAL-PERSONAL",
@@ -896,8 +896,8 @@ class TestWhatCountsAsBusy:
 # Contacts
 # ----------------------------------------------------------------------
 
-from calendar_mcp.carddav import AddressBook, Card
-from calendar_mcp.carddav import NotFound as CardNotFound
+from dav_mcp.carddav import AddressBook, Card
+from dav_mcp.carddav import NotFound as CardNotFound
 
 BOOK = AddressBook(id="card", name="Contacts", url="https://example.invalid/card/", read_only=False)
 BOOK_RO = AddressBook(id="ro", name="Shared", url="https://example.invalid/ro/", read_only=True)

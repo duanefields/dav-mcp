@@ -33,7 +33,7 @@ from .dates import DateError, format_duration, parse_duration
 
 logger = logging.getLogger(__name__)
 
-PRODID = "-//calendar-mcp//EN"
+PRODID = "-//dav-mcp//EN"
 
 _FREQUENCIES = ("daily", "weekly", "monthly", "yearly")
 _WEEKDAYS = ("mo", "tu", "we", "th", "fr", "sa", "su")

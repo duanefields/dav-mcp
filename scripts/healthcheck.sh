@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Poll a running calendar-mcp server and report to a dead-man's-switch.
+# Poll a running dav-mcp server and report to a dead-man's-switch.
 #
 # Intended for cron:
-#   */10 * * * * /Users/you/Code/calendar-mcp/scripts/healthcheck.sh >> /Users/you/.calendar-mcp/check.log 2>&1
+#   */10 * * * * /Users/you/Code/dav-mcp/scripts/healthcheck.sh >> /Users/you/.dav-mcp/check.log 2>&1
 #
-# Configuration comes from ~/.calendar-mcp/check.env, if it exists:
+# Configuration comes from ~/.dav-mcp/check.env, if it exists:
 #
 #   HEALTH_URL=http://127.0.0.1:18790/health
 #   PING_URL=https://hc-ping.com/your-uuid-here
@@ -18,7 +18,7 @@
 # report, rather than dying on the first one and pinging nothing.
 set -uo pipefail
 
-CONFIG="${CALENDAR_MCP_CHECK_ENV:-$HOME/.calendar-mcp/check.env}"
+CONFIG="${DAV_MCP_CHECK_ENV:-$HOME/.dav-mcp/check.env}"
 # shellcheck disable=SC1090
 [[ -f "$CONFIG" ]] && source "$CONFIG"
 
@@ -83,7 +83,7 @@ else
 fi
 
 if (( ${#problems[@]} > 0 )); then
-  message="calendar-mcp check FAILED"
+  message="dav-mcp check FAILED"
   for problem in "${problems[@]}"; do
     message+=$'\n'"- $problem"
   done
@@ -94,5 +94,5 @@ fi
 
 # Logged on every run, not just on failure, so the log doubles as a record of
 # how the service has actually been behaving.
-log "calendar-mcp OK status=$status calendars=$calendars python=$python_version last_write=${write_ok:-none}"
+log "dav-mcp OK status=$status calendars=$calendars python=$python_version last_write=${write_ok:-none}"
 ping_hc ""

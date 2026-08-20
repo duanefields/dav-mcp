@@ -1,6 +1,6 @@
 """Optional authentication for the HTTP transport.
 
-Selected with ``CALENDAR_MCP_AUTH``:
+Selected with ``DAV_MCP_AUTH``:
 
 ``none`` (default)
     No authentication. Correct for stdio and for a server bound to localhost or a
@@ -502,33 +502,33 @@ def build_auth() -> AuthProvider | None:
     Returns ``None`` when authentication is disabled, which is the default and
     leaves the server usable over stdio or on a trusted localhost bind.
     """
-    mode = os.environ.get("CALENDAR_MCP_AUTH", "none").strip().lower()
+    mode = os.environ.get("DAV_MCP_AUTH", "none").strip().lower()
 
     if mode in ("", "none"):
         return None
 
     if mode != "password":
         raise ValueError(
-            f"Unknown CALENDAR_MCP_AUTH mode {mode!r}. Supported values: none, password."
+            f"Unknown DAV_MCP_AUTH mode {mode!r}. Supported values: none, password."
         )
 
-    password = os.environ.get("CALENDAR_MCP_PASSWORD", "")
+    password = os.environ.get("DAV_MCP_PASSWORD", "")
     if not password:
         raise ValueError(
-            "CALENDAR_MCP_AUTH=password requires CALENDAR_MCP_PASSWORD to be set."
+            "DAV_MCP_AUTH=password requires DAV_MCP_PASSWORD to be set."
         )
 
-    base_url = os.environ.get("CALENDAR_MCP_BASE_URL", "").strip()
+    base_url = os.environ.get("DAV_MCP_BASE_URL", "").strip()
     if not base_url:
         raise ValueError(
-            "CALENDAR_MCP_AUTH=password requires CALENDAR_MCP_BASE_URL, the public URL "
+            "DAV_MCP_AUTH=password requires DAV_MCP_BASE_URL, the public URL "
             "clients reach this server on (for example https://calendar.example.com). "
             "It becomes the OAuth issuer and must match exactly, including scheme."
         )
 
-    state_dir = os.environ.get("CALENDAR_MCP_STATE_DIR", "").strip()
+    state_dir = os.environ.get("DAV_MCP_STATE_DIR", "").strip()
     state_path = (
-        Path(state_dir).expanduser() if state_dir else Path.home() / ".calendar-mcp"
+        Path(state_dir).expanduser() if state_dir else Path.home() / ".dav-mcp"
     ) / "oauth-state.json"
 
     return PasswordOAuthProvider(

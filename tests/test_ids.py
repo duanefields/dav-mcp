@@ -7,7 +7,7 @@ hand, so the failure message matters as much as the encoding.
 
 import pytest
 
-from calendar_mcp import ids
+from dav_mcp import ids
 
 
 class TestRoundTrip:

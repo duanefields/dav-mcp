@@ -14,7 +14,7 @@ Apple Events. That is what forces it to be a LaunchAgent with a live GUI session
 and it is what makes a macOS privacy prompt hang the process on first start with a
 live PID, an unbound port and an empty log.
 
-**None of that applies here.** calendar-mcp talks to `caldav.icloud.com` over
+**None of that applies here.** dav-mcp talks to `caldav.icloud.com` over
 HTTPS and touches no local application, no protected container and no Apple
 Events. So:
 
@@ -46,7 +46,7 @@ plist, which is why the plist is `chmod 600`.
 
 ## Template
 
-Save as `~/Library/LaunchAgents/com.example.calendar-mcp.plist`, replacing the
+Save as `~/Library/LaunchAgents/com.example.dav-mcp.plist`, replacing the
 placeholders. It contains two secrets, so `chmod 600` it.
 
 ```xml
@@ -55,15 +55,15 @@ placeholders. It contains two secrets, so `chmod 600` it.
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.example.calendar-mcp</string>
+  <key>Label</key><string>com.example.dav-mcp</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/USERNAME/Code/calendar-mcp/.venv/bin/python</string>
+    <string>/Users/USERNAME/Code/dav-mcp/.venv/bin/python</string>
     <string>-m</string>
-    <string>calendar_mcp</string>
+    <string>dav_mcp</string>
   </array>
-  <key>WorkingDirectory</key><string>/Users/USERNAME/Code/calendar-mcp</string>
+  <key>WorkingDirectory</key><string>/Users/USERNAME/Code/dav-mcp</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -72,15 +72,15 @@ placeholders. It contains two secrets, so `chmod 600` it.
     <!-- iCloud publishes no default calendar, so pin it. Without this the
          server writes to whichever calendar it happens to list first, which
          changes the moment a calendar is added to the account. -->
-    <key>CALENDAR_MCP_DEFAULT_CALENDAR</key><string>Personal</string>
+    <key>DAV_MCP_DEFAULT_CALENDAR</key><string>Personal</string>
 
-    <key>CALENDAR_MCP_TRANSPORT</key><string>http</string>
-    <key>CALENDAR_MCP_HOST</key><string>127.0.0.1</string>
-    <key>CALENDAR_MCP_PORT</key><string>18790</string>
-    <key>CALENDAR_MCP_AUTH</key><string>password</string>
-    <key>CALENDAR_MCP_PASSWORD</key><string>REPLACE-WITH-A-LONG-RANDOM-VALUE</string>
-    <key>CALENDAR_MCP_BASE_URL</key><string>https://calendar.example.com</string>
-    <key>CALENDAR_MCP_STATE_DIR</key><string>/Users/USERNAME/.calendar-mcp</string>
+    <key>DAV_MCP_TRANSPORT</key><string>http</string>
+    <key>DAV_MCP_HOST</key><string>127.0.0.1</string>
+    <key>DAV_MCP_PORT</key><string>18790</string>
+    <key>DAV_MCP_AUTH</key><string>password</string>
+    <key>DAV_MCP_PASSWORD</key><string>REPLACE-WITH-A-LONG-RANDOM-VALUE</string>
+    <key>DAV_MCP_BASE_URL</key><string>https://calendar.example.com</string>
+    <key>DAV_MCP_STATE_DIR</key><string>/Users/USERNAME/.dav-mcp</string>
     <!-- Without this, Python block-buffers to the log file and it stays empty,
          which makes a startup problem look like total silence. -->
     <key>PYTHONUNBUFFERED</key><string>1</string>
@@ -88,15 +88,15 @@ placeholders. It contains two secrets, so `chmod 600` it.
 
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/USERNAME/.calendar-mcp/server.log</string>
-  <key>StandardErrorPath</key><string>/Users/USERNAME/.calendar-mcp/server.log</string>
+  <key>StandardOutPath</key><string>/Users/USERNAME/.dav-mcp/server.log</string>
+  <key>StandardErrorPath</key><string>/Users/USERNAME/.dav-mcp/server.log</string>
 </dict>
 </plist>
 ```
 
 ```bash
-chmod 600 ~/Library/LaunchAgents/com.example.calendar-mcp.plist
-launchctl load ~/Library/LaunchAgents/com.example.calendar-mcp.plist
+chmod 600 ~/Library/LaunchAgents/com.example.dav-mcp.plist
+launchctl load ~/Library/LaunchAgents/com.example.dav-mcp.plist
 curl -s localhost:18790/health
 ```
 
@@ -149,21 +149,21 @@ https://calendar.example.com/mcp
 ```
 
 It registers itself (dynamic client registration is enabled), gets redirected to
-the server's own `/login` page, and you enter `CALENDAR_MCP_PASSWORD` once.
+the server's own `/login` page, and you enter `DAV_MCP_PASSWORD` once.
 
 MCP Inspector succeeding is **not** sufficient evidence. There is a known pattern
 of servers that authenticate fine in Inspector and fail in Claude connectors.
 Test against Claude directly and treat that as the only gate.
 
 Cutover order matters, because the issuer is baked into the registration:
-configure the server with the final `CALENDAR_MCP_BASE_URL` → start HTTP mode →
+configure the server with the final `DAV_MCP_BASE_URL` → start HTTP mode →
 verify over the tunnel from off-network → add the connector in Claude →
 authorize once.
 
 ## Monitoring
 
 `scripts/healthcheck.sh` polls `/health` and reports to a dead-man's-switch.
-Configure it in `~/.calendar-mcp/check.env`:
+Configure it in `~/.dav-mcp/check.env`:
 
 ```bash
 HEALTH_URL=http://127.0.0.1:18790/health
@@ -171,7 +171,7 @@ PING_URL=https://hc-ping.com/your-uuid-here
 ```
 
 ```cron
-*/10 * * * * /Users/you/Code/calendar-mcp/scripts/healthcheck.sh >> /Users/you/.calendar-mcp/check.log 2>&1
+*/10 * * * * /Users/you/Code/dav-mcp/scripts/healthcheck.sh >> /Users/you/.dav-mcp/check.log 2>&1
 ```
 
 `chmod 600` the config: the ping URL is a capability, not just an address. If the host runs more than one such
@@ -198,18 +198,18 @@ period to match the cron interval, with a grace of two or three intervals.
 
 `scripts/self-update.sh` pulls the tracked branch, syncs dependencies if they
 moved, and restarts the service — so a push is a deploy. Configure it in
-`~/.calendar-mcp/update.env`:
+`~/.dav-mcp/update.env`:
 
 ```bash
-REPO_DIR=/Users/you/Code/calendar-mcp
+REPO_DIR=/Users/you/Code/dav-mcp
 BRANCH=main
-LAUNCH_LABEL=com.example.calendar-mcp
+LAUNCH_LABEL=com.example.dav-mcp
 PING_URL=https://hc-ping.com/a-different-uuid
 RESET_HARD=true
 ```
 
 ```cron
-*/15 * * * * /Users/you/Code/calendar-mcp/scripts/self-update.sh >> /Users/you/.calendar-mcp/update.log 2>&1
+*/15 * * * * /Users/you/Code/dav-mcp/scripts/self-update.sh >> /Users/you/.dav-mcp/update.log 2>&1
 ```
 
 `RESET_HARD=true` is right for a host that is only ever deployed to: without it
@@ -219,14 +219,14 @@ notice.
 One trap when setting this up: **build the virtualenv where it will finally
 live.** `uv` records absolute paths, so a venv created in one directory and then
 moved leaves the editable install pointing at the old location, and the service
-fails with `No module named calendar_mcp`. Re-run `uv sync` after any move.
+fails with `No module named dav_mcp`. Re-run `uv sync` after any move.
 
 ## Checking on it
 
 ```bash
-launchctl list | grep calendar-mcp     # pid, last exit code
+launchctl list | grep dav-mcp     # pid, last exit code
 curl -s localhost:18790/health         # reachability, calendar count, last write
-tail -f ~/.calendar-mcp/server.log
+tail -f ~/.dav-mcp/server.log
 ```
 
 A healthy response looks like:

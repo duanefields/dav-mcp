@@ -113,40 +113,6 @@ wheels = [
 ]
 
 [[package]]
-name = "calendar-mcp"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "fastmcp" },
-    { name = "httpx" },
-    { name = "icalendar" },
-    { name = "tzdata" },
-    { name = "vobject" },
-]
-
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-mock" },
-    { name = "respx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastmcp", specifier = ">=3.0.0,<4" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "icalendar", specifier = ">=6.1" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.14.0" },
-    { name = "respx", marker = "extra == 'test'", specifier = ">=0.22.0" },
-    { name = "tzdata", specifier = ">=2024.1" },
-    { name = "vobject", specifier = ">=0.9.9" },
-]
-provides-extras = ["test"]
-
-[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -325,6 +291,40 @@ sdist = { url = "https://files.pythonhosted.org/packages/5e/62/1b160d5e8c2017439
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/1f/70aeb4f9a420cb62726d943b0d893c2bf9e9ab9c81a93f7542d3beb5d69c/cyclopts-4.23.0-py3-none-any.whl", hash = "sha256:1581758c5b9982c3b2ae7df6d87243e3a6fc3265ea621f96caeb349b6fa43ad2", size = 234671, upload-time = "2026-08-17T19:44:19.604Z" },
 ]
+
+[[package]]
+name = "dav-mcp"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fastmcp" },
+    { name = "httpx" },
+    { name = "icalendar" },
+    { name = "tzdata" },
+    { name = "vobject" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-mock" },
+    { name = "respx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastmcp", specifier = ">=3.0.0,<4" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "icalendar", specifier = ">=6.1" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24.0" },
+    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.14.0" },
+    { name = "respx", marker = "extra == 'test'", specifier = ">=0.22.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
+    { name = "vobject", specifier = ">=0.9.9" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "dnspython"

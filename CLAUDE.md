@@ -12,10 +12,10 @@ in this repository.
 uv sync
 
 # Run the MCP server (stdio transport, default)
-uv run calendar-mcp
+uv run dav-mcp
 
 # Run with HTTP transport
-CALENDAR_MCP_TRANSPORT=http uv run calendar-mcp
+DAV_MCP_TRANSPORT=http uv run dav-mcp
 ```
 
 ### Testing
@@ -36,35 +36,35 @@ touches a real iCloud account.
 An MCP server that bridges a model to Apple iCloud Calendar over CalDAV. Layered
 so that each file has exactly one thing that can go wrong in it:
 
-0. **src/calendar_mcp/dav.py** — HTTP plumbing shared by both protocols: auth,
+0. **src/dav_mcp/dav.py** — HTTP plumbing shared by both protocols: auth,
    retries, throttling, error mapping, the principal→home discovery walk, and
    resource GET/PUT/DELETE. Both clients extend `DavClient`, so a fix here
    applies to calendar and contacts alike.
-1. **src/calendar_mcp/caldav.py** — the protocol. Discovery (principal →
+1. **src/dav_mcp/caldav.py** — the protocol. Discovery (principal →
    calendar-home-set → calendars, cached 300s), `calendar-query` REPORTs,
    `GET`/`PUT`/`DELETE` of `.ics` resources. Everything Apple-specific lives
    here. Returns `Resource` objects holding raw iCalendar text; it does not
    parse events.
-2. **src/calendar_mcp/ical.py** — translation between VEVENTs and the dicts the
+2. **src/dav_mcp/ical.py** — translation between VEVENTs and the dicts the
    tools return, in both directions. Uses the `icalendar` library so escaping,
    line folding and VTIMEZONE generation are not hand-rolled.
-3. **src/calendar_mcp/ids.py** — opaque, stateless event ids encoding
+3. **src/dav_mcp/ids.py** — opaque, stateless event ids encoding
    `(calendar, resource, recurrence key)`. There is no database.
-4. **src/calendar_mcp/dates.py** — `after`/`before` parsing (ISO plus relative
+4. **src/dav_mcp/dates.py** — `after`/`before` parsing (ISO plus relative
    expressions) and ISO 8601 duration conversion.
-5. **src/calendar_mcp/server.py** — the tools, the `/health` route, and
+5. **src/dav_mcp/server.py** — the tools, the `/health` route, and
    transport selection in `main()`.
-6. **src/calendar_mcp/carddav.py** — CardDAV protocol: address book discovery,
+6. **src/dav_mcp/carddav.py** — CardDAV protocol: address book discovery,
    `addressbook-query` search, resource writes.
-7. **src/calendar_mcp/vcard.py** — vCard ↔ dict, via `vobject`. Reading is
+7. **src/dav_mcp/vcard.py** — vCard ↔ dict, via `vobject`. Reading is
    lossy by design (photos and internal properties are not reported); **writing
    is not** — see below.
-8. **src/calendar_mcp/availability.py** — interval arithmetic for
+8. **src/dav_mcp/availability.py** — interval arithmetic for
    `find_free_time`: merge, invert, per-day working windows, slot search. Pure
    functions over aware datetimes, so it is tested without a network or a
    clock. Which events *count* as busy is decided in `server._busy_intervals`,
    not here — that is policy, not arithmetic.
-7. **src/calendar_mcp/auth.py** — password-guarded OAuth 2.1 provider for the
+7. **src/dav_mcp/auth.py** — password-guarded OAuth 2.1 provider for the
    HTTP transport. Ported from things-mcp; domain-independent apart from the
    scope name and the env prefix.
 
@@ -131,7 +131,7 @@ understood, so check here before assuming the spec applies:
   `<uid>@google.com.ics`. Event ids join their parts with `\x1f` for exactly
   this reason; `/` and `@` both split such a name in the middle.
 - **iCloud publishes no default calendar.** `schedule-default-calendar-URL`
-  comes back empty, so `CALENDAR_MCP_DEFAULT_CALENDAR` is how a default is set.
+  comes back empty, so `DAV_MCP_DEFAULT_CALENDAR` is how a default is set.
 - **A burst of writes gets the account throttled**, and iCloud answers `503`
   with `Retry-After: 30` — on *every* request, including reads, until it
   clears. It looks like an outage and reads like a broken server. `_request`

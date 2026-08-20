@@ -11,19 +11,19 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from calendar_mcp import server
+from dav_mcp import server
 
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
     for name in (
-        "CALENDAR_MCP_TRANSPORT",
-        "CALENDAR_MCP_HOST",
-        "CALENDAR_MCP_PORT",
-        "CALENDAR_MCP_STATELESS",
-        "CALENDAR_MCP_AUTH",
-        "CALENDAR_MCP_PASSWORD",
-        "CALENDAR_MCP_BASE_URL",
+        "DAV_MCP_TRANSPORT",
+        "DAV_MCP_HOST",
+        "DAV_MCP_PORT",
+        "DAV_MCP_STATELESS",
+        "DAV_MCP_AUTH",
+        "DAV_MCP_PASSWORD",
+        "DAV_MCP_BASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -35,7 +35,7 @@ class TestTransportSelection:
         run.assert_called_once_with()
 
     def test_http_binds_localhost_and_the_project_port_by_default(self, monkeypatch):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
         with patch.object(server.mcp, "run") as run:
             server.main()
         kwargs = run.call_args.kwargs
@@ -44,9 +44,9 @@ class TestTransportSelection:
         assert kwargs["port"] == 18790
 
     def test_host_and_port_are_configurable(self, monkeypatch):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_HOST", "0.0.0.0")
-        monkeypatch.setenv("CALENDAR_MCP_PORT", "9999")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_HOST", "0.0.0.0")
+        monkeypatch.setenv("DAV_MCP_PORT", "9999")
         with patch.object(server.mcp, "run") as run:
             server.main()
         assert run.call_args.kwargs["host"] == "0.0.0.0"
@@ -55,14 +55,14 @@ class TestTransportSelection:
     def test_the_environment_is_read_at_run_time_not_import_time(self, monkeypatch):
         # launchd sets the environment for a process that has already imported
         # the module, and the tests rely on the same property.
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_PORT", "12345")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_PORT", "12345")
         with patch.object(server.mcp, "run") as run:
             server.main()
         assert run.call_args.kwargs["port"] == 12345
 
     def test_an_unrecognized_transport_falls_back_to_stdio(self, monkeypatch):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "carrier-pigeon")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "carrier-pigeon")
         with patch.object(server.mcp, "run") as run:
             server.main()
         run.assert_called_once_with()
@@ -74,23 +74,23 @@ class TestStatelessHttp:
     opened the session is rejected, and the connection wedges."""
 
     def test_stateless_is_on_by_default(self, monkeypatch):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
         with patch.object(server.mcp, "run") as run:
             server.main()
         assert run.call_args.kwargs["stateless_http"] is True
 
     @pytest.mark.parametrize("value", ["false", "FALSE", " False "])
     def test_only_an_explicit_false_restores_sessions(self, monkeypatch, value):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_STATELESS", value)
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_STATELESS", value)
         with patch.object(server.mcp, "run") as run:
             server.main()
         assert run.call_args.kwargs["stateless_http"] is False
 
     @pytest.mark.parametrize("value", ["true", "yes", "", "0", "no"])
     def test_anything_else_stays_stateless(self, monkeypatch, value):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_STATELESS", value)
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_STATELESS", value)
         with patch.object(server.mcp, "run") as run:
             server.main()
         assert run.call_args.kwargs["stateless_http"] is True
@@ -98,21 +98,21 @@ class TestStatelessHttp:
 
 class TestAuthAttachment:
     def test_password_auth_is_attached_for_http(self, monkeypatch):
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_AUTH", "password")
-        monkeypatch.setenv("CALENDAR_MCP_PASSWORD", "a-long-random-value")
-        monkeypatch.setenv("CALENDAR_MCP_BASE_URL", "https://calendar.example.com")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_AUTH", "password")
+        monkeypatch.setenv("DAV_MCP_PASSWORD", "a-long-random-value")
+        monkeypatch.setenv("DAV_MCP_BASE_URL", "https://calendar.example.com")
         with patch.object(server.mcp, "run"):
             server.main()
         assert server.mcp.auth is not None
 
     def test_a_misconfigured_password_mode_fails_loudly_at_startup(self, monkeypatch):
         # Better to refuse to boot than to serve the calendar unauthenticated.
-        monkeypatch.setenv("CALENDAR_MCP_TRANSPORT", "http")
-        monkeypatch.setenv("CALENDAR_MCP_AUTH", "password")
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_AUTH", "password")
         with patch.object(server.mcp, "run"), pytest.raises(ValueError) as excinfo:
             server.main()
-        assert "CALENDAR_MCP_PASSWORD" in str(excinfo.value)
+        assert "DAV_MCP_PASSWORD" in str(excinfo.value)
 
 
 async def health_json():

@@ -5,11 +5,11 @@
 # Intended for a machine that hosts the server and is not sat in front of, so
 # that pushing to the tracked branch is enough to deploy.
 #
-# Configuration comes from ~/.calendar-mcp/update.env, if it exists:
+# Configuration comes from ~/.dav-mcp/update.env, if it exists:
 #
-#   REPO_DIR=/Users/you/Code/calendar-mcp
+#   REPO_DIR=/Users/you/Code/dav-mcp
 #   BRANCH=main
-#   LAUNCH_LABEL=com.example.calendar-mcp   # omit to skip restarting anything
+#   LAUNCH_LABEL=com.example.dav-mcp   # omit to skip restarting anything
 #   PING_URL=https://hc-ping.com/your-uuid-here
 #   RESET_HARD=true                       # discard local edits; deploy-only hosts
 #
@@ -17,11 +17,11 @@
 
 set -uo pipefail
 
-CONFIG="${CALENDAR_MCP_UPDATE_ENV:-$HOME/.calendar-mcp/update.env}"
+CONFIG="${DAV_MCP_UPDATE_ENV:-$HOME/.dav-mcp/update.env}"
 # shellcheck source=/dev/null
 [[ -f "$CONFIG" ]] && source "$CONFIG"
 
-REPO_DIR="${REPO_DIR:-$HOME/Code/calendar-mcp}"
+REPO_DIR="${REPO_DIR:-$HOME/Code/dav-mcp}"
 BRANCH="${BRANCH:-main}"
 LAUNCH_LABEL="${LAUNCH_LABEL:-}"
 PING_URL="${PING_URL:-}"
@@ -32,7 +32,7 @@ UV="${UV:-/opt/homebrew/bin/uv}"
 RESET_HARD="${RESET_HARD:-false}"
 
 # mkdir is atomic and works without flock, which macOS lacks.
-LOCKDIR="/tmp/calendar-mcp-self-update.lock"
+LOCKDIR="/tmp/dav-mcp-self-update.lock"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 ping_hc() { [[ -z "$PING_URL" ]] && return 0; curl -fsS -m 10 --retry 3 --data-raw "${2:-}" "${PING_URL}${1}" >/dev/null 2>&1 || true; }

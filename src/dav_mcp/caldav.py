@@ -217,7 +217,7 @@ class CalDavClient(DavClient):
     async def default_calendar(self) -> Calendar:
         """The calendar to write to when the caller does not name one.
 
-        ``CALENDAR_MCP_DEFAULT_CALENDAR`` names it, by id or display name.
+        ``DAV_MCP_DEFAULT_CALENDAR`` names it, by id or display name.
         Setting it is strongly recommended: iCloud does not publish
         ``schedule-default-calendar-URL`` (it comes back empty), so with nothing
         configured the only available tie-break is the order the server happens
@@ -228,19 +228,19 @@ class CalDavClient(DavClient):
         if not writable:
             raise CalDavError("The account has no writable event calendar.")
 
-        wanted = os.environ.get("CALENDAR_MCP_DEFAULT_CALENDAR", "").strip()
+        wanted = os.environ.get("DAV_MCP_DEFAULT_CALENDAR", "").strip()
         if wanted:
             for cal in writable:
                 if cal.id == wanted or cal.name.lower() == wanted.lower():
                     return cal
             raise NotFound(
-                f"CALENDAR_MCP_DEFAULT_CALENDAR is set to {wanted!r}, but no "
+                f"DAV_MCP_DEFAULT_CALENDAR is set to {wanted!r}, but no "
                 "writable event calendar has that id or name. Available: "
                 + ", ".join(repr(cal.name) for cal in writable)
             )
 
         logger.info(
-            "No CALENDAR_MCP_DEFAULT_CALENDAR set; defaulting to %r. Set it to "
+            "No DAV_MCP_DEFAULT_CALENDAR set; defaulting to %r. Set it to "
             "pin this, since server ordering is not stable.",
             writable[0].name,
         )
@@ -396,6 +396,6 @@ def client_from_env() -> CalDavClient:
     return CalDavClient(
         username=apple_id,
         password=password,
-        root=os.environ.get("CALENDAR_MCP_CALDAV_ROOT", DEFAULT_ROOT).strip()
+        root=os.environ.get("DAV_MCP_CALDAV_ROOT", DEFAULT_ROOT).strip()
         or DEFAULT_ROOT,
     )

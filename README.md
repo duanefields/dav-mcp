@@ -1,4 +1,4 @@
-# calendar-mcp
+# dav-mcp
 
 An MCP server for Apple iCloud **Calendar and Contacts**, over CalDAV and
 CardDAV. One Apple ID, one app-specific password, one endpoint.
@@ -87,14 +87,14 @@ cp .env.example .env      # then fill in the two credentials
 two-factor account rejects the account password outright.
 
 ```bash
-uv run calendar-mcp                              # stdio
-CALENDAR_MCP_TRANSPORT=http uv run calendar-mcp  # http on 127.0.0.1:18790
+uv run dav-mcp                              # stdio
+DAV_MCP_TRANSPORT=http uv run dav-mcp  # http on 127.0.0.1:18790
 ```
 
 To use it from Claude Code over stdio:
 
 ```bash
-claude mcp add calendar -- uv --directory /path/to/calendar-mcp run calendar-mcp
+claude mcp add calendar -- uv --directory /path/to/dav-mcp run dav-mcp
 ```
 
 ## Configuration
@@ -106,19 +106,19 @@ itself, which only documents them.
 | :--- | :--- | :--- |
 | `APPLE_ID` | — | Apple ID email. Required. |
 | `APPLE_APP_PASSWORD` | — | App-specific password. Required. |
-| `CALENDAR_MCP_DEFAULT_CALENDAR` | first writable | Calendar `create_event` writes to when the caller names none, by id or display name. |
-| `CALENDAR_MCP_TIMEZONE` | host zone | IANA zone assumed when a caller omits `timeZone`. |
-| `CALENDAR_MCP_CALDAV_ROOT` | `https://caldav.icloud.com` | CalDAV entry point. |
-| `CALENDAR_MCP_TRANSPORT` | `stdio` | `stdio` or `http`. |
-| `CALENDAR_MCP_HOST` | `127.0.0.1` | HTTP bind address. |
-| `CALENDAR_MCP_PORT` | `18790` | HTTP bind port. |
-| `CALENDAR_MCP_STATELESS` | `true` | `false` restores per-client sessions. |
-| `CALENDAR_MCP_AUTH` | `none` | `none` or `password`. HTTP only. |
-| `CALENDAR_MCP_PASSWORD` | — | Shared password. Required when `AUTH=password`. |
-| `CALENDAR_MCP_BASE_URL` | — | Public URL; becomes the OAuth issuer. Required when `AUTH=password`. |
-| `CALENDAR_MCP_STATE_DIR` | `~/.calendar-mcp` | Where OAuth state is persisted. |
+| `DAV_MCP_DEFAULT_CALENDAR` | first writable | Calendar `create_event` writes to when the caller names none, by id or display name. |
+| `DAV_MCP_TIMEZONE` | host zone | IANA zone assumed when a caller omits `timeZone`. |
+| `DAV_MCP_CALDAV_ROOT` | `https://caldav.icloud.com` | CalDAV entry point. |
+| `DAV_MCP_TRANSPORT` | `stdio` | `stdio` or `http`. |
+| `DAV_MCP_HOST` | `127.0.0.1` | HTTP bind address. |
+| `DAV_MCP_PORT` | `18790` | HTTP bind port. |
+| `DAV_MCP_STATELESS` | `true` | `false` restores per-client sessions. |
+| `DAV_MCP_AUTH` | `none` | `none` or `password`. HTTP only. |
+| `DAV_MCP_PASSWORD` | — | Shared password. Required when `AUTH=password`. |
+| `DAV_MCP_BASE_URL` | — | Public URL; becomes the OAuth issuer. Required when `AUTH=password`. |
+| `DAV_MCP_STATE_DIR` | `~/.dav-mcp` | Where OAuth state is persisted. |
 
-**Set `CALENDAR_MCP_DEFAULT_CALENDAR`.** iCloud does not publish
+**Set `DAV_MCP_DEFAULT_CALENDAR`.** iCloud does not publish
 `schedule-default-calendar-URL` — it comes back empty — so with nothing
 configured the only available tie-break is the order the server happens to list
 collections in, which changes the moment you add a calendar to the account.
@@ -126,7 +126,7 @@ collections in, which changes the moment you add a calendar to the account.
 ## Authentication
 
 A remote MCP client has one input field: a URL. There is nowhere to put an API
-key. So `CALENDAR_MCP_AUTH=password` starts a self-contained OAuth 2.1
+key. So `DAV_MCP_AUTH=password` starts a self-contained OAuth 2.1
 authorization server whose only credential is one shared password — the client
 discovers it, registers itself, and gets redirected to a password form.
 

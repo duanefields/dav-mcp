@@ -11,7 +11,7 @@ so a regression here would break contacts and calendar alike.
 import httpx
 import pytest
 
-from calendar_mcp.dav import AuthError, DavClient, DavError, NotFound, Throttled
+from dav_mcp.dav import AuthError, DavClient, DavError, NotFound, Throttled
 
 
 def client(handler):
@@ -27,7 +27,7 @@ def client(handler):
 
 class TestThrottling:
     async def test_a_503_is_retried_and_can_succeed(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("dav_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         calls = []
 
         def handler(request):
@@ -45,7 +45,7 @@ class TestThrottling:
     ):
         # The failure this message exists for: a burst of writes gets the
         # account throttled, and "503" alone reads like the server is broken.
-        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("dav_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         with pytest.raises(Throttled) as excinfo:
             await client(lambda request: httpx.Response(503))._request(
                 "PROPFIND", "https://x/", expect=(207,)
@@ -55,7 +55,7 @@ class TestThrottling:
         assert "not a credential problem" in message
 
     async def test_a_429_is_treated_the_same_way(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0,))
+        monkeypatch.setattr("dav_mcp.dav.RETRY_BACKOFF", (0,))
         with pytest.raises(Throttled):
             await client(lambda request: httpx.Response(429))._request(
                 "PROPFIND", "https://x/", expect=(207,)
@@ -67,8 +67,8 @@ class TestThrottling:
         async def fake_sleep(seconds):
             slept.append(seconds)
 
-        monkeypatch.setattr("calendar_mcp.dav.asyncio.sleep", fake_sleep)
-        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (1.0,))
+        monkeypatch.setattr("dav_mcp.dav.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("dav_mcp.dav.RETRY_BACKOFF", (1.0,))
         with pytest.raises(Throttled):
             await client(
                 lambda request: httpx.Response(503, headers={"Retry-After": "9999"})
@@ -85,7 +85,7 @@ class TestThrottling:
         async def fake_sleep(seconds):
             slept.append(seconds)
 
-        monkeypatch.setattr("calendar_mcp.dav.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("dav_mcp.dav.asyncio.sleep", fake_sleep)
         with pytest.raises(Throttled):
             await client(
                 lambda request: httpx.Response(503, headers={"Retry-After": "30"})
@@ -93,7 +93,7 @@ class TestThrottling:
         assert sum(slept) <= 10.0
 
     async def test_an_ordinary_error_is_not_retried(self, monkeypatch):
-        monkeypatch.setattr("calendar_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
+        monkeypatch.setattr("dav_mcp.dav.RETRY_BACKOFF", (0, 0, 0))
         calls = []
 
         def handler(request):

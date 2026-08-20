@@ -1758,12 +1758,12 @@ def main():
     """Run the server on the transport the environment selects."""
     # Read transport settings here rather than at import time so that a service
     # manager and the tests can set the environment before calling main().
-    transport = os.environ.get("CALENDAR_MCP_TRANSPORT", "stdio")
+    transport = os.environ.get("DAV_MCP_TRANSPORT", "stdio")
     if transport == "http":
         from .auth import build_auth
 
-        host = os.environ.get("CALENDAR_MCP_HOST", "127.0.0.1")
-        port = int(os.environ.get("CALENDAR_MCP_PORT", "18790"))
+        host = os.environ.get("DAV_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("DAV_MCP_PORT", "18790"))
         # Authentication applies to the HTTP transport only; stdio inherits its
         # security from local execution.
         mcp.auth = build_auth()
@@ -1772,7 +1772,7 @@ def main():
         # request arriving from a different address than the one that opened the
         # session is rejected with a 400. Nothing here needs session state.
         stateless = (
-            os.environ.get("CALENDAR_MCP_STATELESS", "true").strip().lower() != "false"
+            os.environ.get("DAV_MCP_STATELESS", "true").strip().lower() != "false"
         )
         mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
     else:

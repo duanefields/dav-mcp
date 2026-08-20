@@ -320,6 +320,6 @@ def client_from_env() -> CardDavClient:
     return CardDavClient(
         username=apple_id,
         password=password,
-        root=os.environ.get("CALENDAR_MCP_CARDDAV_ROOT", DEFAULT_ROOT).strip()
+        root=os.environ.get("DAV_MCP_CARDDAV_ROOT", DEFAULT_ROOT).strip()
         or DEFAULT_ROOT,
     )

@@ -8,7 +8,7 @@ survives an edit.
 
 import pytest
 
-from calendar_mcp import ids, vcard
+from dav_mcp import ids, vcard
 
 # A card in the shape Apple actually writes: item-grouped labels, repeated
 # type= params, an escaped multi-line street, social profiles, related names,

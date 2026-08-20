@@ -44,7 +44,7 @@ class DateError(ValueError):
 def local_zone() -> ZoneInfo:
     """The IANA zone to assume when a caller omits ``timeZone``.
 
-    ``CALENDAR_MCP_TIMEZONE`` wins if set. Otherwise this reads the
+    ``DAV_MCP_TIMEZONE`` wins if set. Otherwise this reads the
     ``/etc/localtime`` symlink, which is how macOS and Linux both record the
     zone by name -- the stdlib only exposes the current *offset*, and an
     abbreviation like "CDT" is not something ``ZoneInfo`` can take.
@@ -52,13 +52,13 @@ def local_zone() -> ZoneInfo:
     Resolved per call rather than cached, because the process is long-lived and
     a host can change zone under it.
     """
-    configured = os.environ.get("CALENDAR_MCP_TIMEZONE", "").strip()
+    configured = os.environ.get("DAV_MCP_TIMEZONE", "").strip()
     if configured:
         try:
             return ZoneInfo(configured)
         except Exception:
             logger.warning(
-                "CALENDAR_MCP_TIMEZONE=%r is not a known IANA zone; ignoring it.",
+                "DAV_MCP_TIMEZONE=%r is not a known IANA zone; ignoring it.",
                 configured,
             )
 

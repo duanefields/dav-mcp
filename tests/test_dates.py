@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from calendar_mcp.dates import (
+from dav_mcp.dates import (
     DateError,
     format_duration,
     has_explicit_offset,

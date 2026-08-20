@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from calendar_mcp import ical, ids
+from dav_mcp import ical, ids
 
 CHICAGO = ZoneInfo("America/Chicago")
 
