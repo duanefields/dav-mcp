@@ -319,3 +319,54 @@ class TestParseResource:
     def test_an_empty_resource_is_rejected_rather_than_returning_nothing(self):
         with pytest.raises(ical.ICalError):
             ical.parse_resource("BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n")
+
+
+class TestAppleAddressRewriting:
+    """iCloud does not leave a usable address in the property value.
+
+    Stored events carry an internal principal URL; outbound iMIP mail carries an
+    opaque `…@imip.me.com` reply-routing token. Both keep the real address only
+    in the EMAIL parameter, so that is what must be read first.
+    """
+
+    def event_with(self, organizer_value):
+        ics = f"""BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:apple-rewrite
+SUMMARY:Book Club
+DTSTART;TZID=America/Chicago:20260917T140000
+DTEND;TZID=America/Chicago:20260917T143000
+ORGANIZER;EMAIL=ada@example.com;CN=Ada:{organizer_value}
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;EMAIL=ada@example.com:{organizer_value}
+ATTENDEE;EMAIL=jo@example.org;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:jo@example.org
+END:VEVENT
+END:VCALENDAR
+"""
+        return to_dict(ics)
+
+    def test_the_stored_principal_url_form_still_yields_an_address(self):
+        event = self.event_with("/aMTEwMjY5ODIxMTAyNjk4Mv8F-KLQtShy/principal/")
+        owner = [p for p in event["participants"] if p.get("roles", {}).get("owner")]
+        assert [p["email"] for p in owner] == ["ada@example.com"]
+
+    def test_the_imip_token_form_still_yields_an_address(self):
+        event = self.event_with("mailto:2_GEYTAMRWHE4DEMJRGAZDMOJYGL3ZWMGHH@imip.me.com")
+        owner = [p for p in event["participants"] if p.get("roles", {}).get("owner")]
+        assert [p["email"] for p in owner] == ["ada@example.com"]
+        assert "imip.me.com" not in str(event["participants"])
+
+    def test_a_plain_mailto_still_works_when_there_is_no_email_param(self):
+        ics = """BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:plain
+SUMMARY:Book Club
+DTSTART;TZID=America/Chicago:20260917T140000
+DTEND;TZID=America/Chicago:20260917T143000
+ORGANIZER;CN=Ada:mailto:ada@example.com
+END:VEVENT
+END:VCALENDAR
+"""
+        people = to_dict(ics)["participants"]
+        assert [p["email"] for p in people] == ["ada@example.com"]

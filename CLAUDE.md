@@ -92,6 +92,13 @@ understood, so check here before assuming the spec applies:
   this reason; `/` and `@` both split such a name in the middle.
 - **iCloud publishes no default calendar.** `schedule-default-calendar-URL`
   comes back empty, so `CALENDAR_MCP_DEFAULT_CALENDAR` is how a default is set.
+- **A burst of writes gets the account throttled**, and iCloud answers `503`
+  with `Retry-After: 30` — on *every* request, including reads, until it
+  clears. It looks like an outage and reads like a broken server. `_request`
+  retries briefly and then raises `Throttled`, whose message says explicitly
+  that it is rate limiting rather than a credential problem. Keep the retry
+  budget under ~10s: obeying `Retry-After` literally made tool calls hang for
+  90 seconds, which is worse than failing fast and letting the caller retry.
 
 ## Scope
 
@@ -134,7 +141,15 @@ successful send from a PUT that iCloud accepted and then quietly did nothing,
 which is exactly what happens when the ORGANIZER is not one of the account's
 own addresses.
 
-Note iCloud rewrites the ORGANIZER and the account's own ATTENDEE line into an
-internal principal-URL form (`…/principal/`) rather than `mailto:`. Addresses
-are still readable because `ical._address_email` prefers the `EMAIL` parameter
-and only falls back to the value — do not reverse that order.
+iCloud rewrites addresses in two different ways, and **neither leaves a usable
+address in the property value**:
+
+- In the copy it *stores*, ORGANIZER and the account's own ATTENDEE become an
+  internal principal URL: `…/aMTEwMjY5…/principal/`.
+- In the iMIP mail it *sends*, they become an opaque reply-routing token:
+  `mailto:2_GEYTAMRWHE4DE…@imip.me.com`.
+
+In both cases the real address survives only in the `EMAIL` parameter. This is
+why `ical._address_email` reads `EMAIL` first and only falls back to the
+property value — reverse that order and every organizer comes back as an
+unreadable Apple token.

@@ -22,6 +22,7 @@ changes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -37,6 +38,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_ROOT = "https://caldav.icloud.com"
 USER_AGENT = "calendar-mcp/0.1"
 _DISCOVERY_TTL = 300.0
+
+# iCloud starts answering 503 after a burst of writes. It clears on its own, so
+# a short retry turns a transient blip into a slow success.
+#
+# Deliberately brief. iCloud sends `Retry-After: 30` when it is throttling in
+# earnest, and honoring that literally makes a tool call hang for a minute and a
+# half -- far worse than failing in a couple of seconds with a message saying to
+# try again. Retry the blips; report the real throttling.
+_RETRY_STATUSES = (429, 503)
+_RETRY_BACKOFF = (1.0, 3.0)
+_RETRY_AFTER_CAP = 5.0
 
 DAV = "{DAV:}"
 CAL = "{urn:ietf:params:xml:ns:caldav}"
@@ -76,6 +88,10 @@ class Conflict(CalDavError):
 
 class AuthError(CalDavError):
     """The Apple ID or app-specific password was rejected."""
+
+
+class Throttled(CalDavError):
+    """iCloud is refusing requests for now. Not a credential problem."""
 
 
 @dataclass(frozen=True)
@@ -156,15 +172,45 @@ class CalDavClient:
         headers: dict[str, str] | None = None,
         expect: tuple[int, ...] = (200, 207),
     ) -> httpx.Response:
-        try:
-            response = await self._http().request(
+        response = None
+        for attempt, pause in enumerate((*_RETRY_BACKOFF, None)):
+            try:
+                response = await self._http().request(
+                    method,
+                    url,
+                    content=body.encode("utf-8") if body else None,
+                    headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                raise CalDavError(f"{method} {url} failed: {exc}") from exc
+
+            if response.status_code not in _RETRY_STATUSES or pause is None:
+                break
+
+            # Honor Retry-After when iCloud bothers to send one.
+            delay = pause
+            retry_after = response.headers.get("Retry-After", "").strip()
+            if retry_after.isdigit():
+                delay = max(delay, min(float(retry_after), _RETRY_AFTER_CAP))
+            logger.warning(
+                "%s %s returned %s; retrying in %.0fs (attempt %d)",
                 method,
                 url,
-                content=body.encode("utf-8") if body else None,
-                headers=headers,
+                response.status_code,
+                delay,
+                attempt + 1,
             )
-        except httpx.HTTPError as exc:
-            raise CalDavError(f"{method} {url} failed: {exc}") from exc
+            await asyncio.sleep(delay)
+
+        assert response is not None
+
+        if response.status_code in _RETRY_STATUSES:
+            raise Throttled(
+                f"iCloud is temporarily refusing requests ({response.status_code}) "
+                "and did not recover after several retries. This is rate limiting, "
+                "not a credential problem -- it usually clears within a few "
+                "minutes. Wait and try again."
+            )
 
         if response.status_code in (401, 403):
             raise AuthError(
