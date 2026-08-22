@@ -184,6 +184,19 @@ that UI. Write confirmation is left to the client's own tool-approval prompt.
 Reminders (VTODO) are out of scope. VTODO calendars are filtered out of
 `list_calendars`.
 
+### Why the server ships `instructions`
+
+Another connected server (Fastmail) exposes near-identical `search_events`,
+`create_event`, `search_contacts` and friends, and its own server-level
+instructions steer calendar work at *its* tools. Server instructions outrank
+tool descriptions, so polishing descriptions alone loses that argument. The
+`instructions=` string on `FastMCP` exists to establish identity -- these are
+the calendars and contacts the user actually keeps, reach here for both -- and
+each tool docstring names iCloud in its first line so the two sets stop reading
+as interchangeable. It also states that events are not tasks, since nothing
+else in the context says so and an agent will otherwise infer a schedule from
+a to-do list. Don't drop these as boilerplate.
+
 ## Scheduling sends real, irrevocable email
 
 `create_event(participants=…)`, `update_event(addParticipants/removeParticipants)`

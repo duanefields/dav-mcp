@@ -38,7 +38,31 @@ from .dates import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("DAV")
+mcp = FastMCP(
+    "DAV",
+    instructions=(
+        "This server reaches the user's own calendars and contacts: the iCloud "
+        "account behind Calendar.app and Contacts.app on their Mac and iPhone. "
+        "That is where their real schedule and their real address book live.\n\n"
+        "Use these tools for all calendar and contact work -- listing, "
+        "searching, creating, editing, RSVPing, deleting, and finding free "
+        "time. Other connected servers may expose similarly named calendar or "
+        "contact tools belonging to accounts the user does not keep their "
+        "schedule or their contacts in; reach here unless the user names "
+        "another account.\n\n"
+        "The address book is also where a person becomes an address. Any tool "
+        "that wants an email address, a phone number or a postal address "
+        "rather than a name -- an invitation, a message, a letter -- gets it "
+        "from search_contacts, which also runs backwards to say whose an "
+        "unfamiliar address or number is.\n\n"
+        "Calendar events are not tasks. Everything here happens at a time -- "
+        "flights, meetings, appointments. To-dos, deadlines and project lists "
+        "live in a task manager, not on the calendar. Answer \"what's on\" "
+        "from here and \"what do I have to do\" from there; a question about "
+        "the shape of a week usually needs both, so do not infer one from the "
+        "other."
+    ),
+)
 
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 10
@@ -377,7 +401,7 @@ def _validate_limit(limit: int | None) -> str | None:
 
 @mcp.tool
 async def list_calendars() -> ToolResult:
-    """List the user's calendars.
+    """List the user's iCloud calendars, the ones in Calendar.app.
 
     Returns calendar IDs, names, and colors. Use this to find which calendar to
     add events to. Only calendars that hold events are listed; reminder lists
@@ -420,7 +444,9 @@ async def search_events(
     limit: int | None = None,
     calendarId: str | None = None,
 ) -> ToolResult:
-    """List or search calendar events.
+    """List or search events on the user's iCloud calendar.
+
+    Events are things scheduled at a time; to-dos and deadlines are not here.
 
     To list a period (e.g. "what's on tomorrow"), pass only 'after'/'before' and
     omit 'query'. Recurring events are expanded into individual occurrences, so
@@ -572,7 +598,7 @@ async def find_free_time(
     includeWeekends: bool | None = None,
     limit: int | None = None,
 ) -> ToolResult:
-    """Find open slots on the user's calendars that are long enough for something.
+    """Find open slots on the user's iCloud calendars long enough for something.
 
     Use this to answer "when am I free for X" or to pick a time before calling
     create_event. To ask what is already scheduled, use search_events instead.
@@ -762,7 +788,7 @@ async def create_event(
         ),
     ] = None,
 ) -> ToolResult:
-    """Create a calendar event. Returns the new event's id.
+    """Create an event on the user's iCloud calendar. Returns its id.
 
     Use update_event to change an existing event.
 
@@ -948,7 +974,7 @@ async def update_event(
         ),
     ] = None,
 ) -> ToolResult:
-    """Update an existing calendar event.
+    """Update an existing event on the user's iCloud calendar.
 
     Use create_event for new events. Only specified fields are changed. For
     recurring events, pass an occurrence ID (from search_events) to modify just
@@ -1199,7 +1225,7 @@ def _clone_as_override(master: Any, recurrence_id: str) -> Any:
 
 @mcp.tool
 async def rsvp_event(id: str, status: str) -> ToolResult:
-    """Respond to a calendar event invitation.
+    """Respond to an invitation on the user's iCloud calendar.
 
     Sets your participation status and sends a reply to the organizer.
 
@@ -1280,7 +1306,7 @@ async def rsvp_event(id: str, status: str) -> ToolResult:
 
 @mcp.tool
 async def delete_event(id: str) -> ToolResult:
-    """Delete a calendar event.
+    """Delete an event from the user's iCloud calendar.
 
     For recurring events, pass an occurrence id to cancel just that occurrence,
     or the master id to delete the entire series.
@@ -1417,7 +1443,7 @@ async def _load_contact(contact_id: str):
 
 @mcp.tool
 async def list_address_books() -> ToolResult:
-    """List the user's address books, with their ids.
+    """List the user's iCloud address books, with their ids.
 
     Most iCloud accounts have exactly one. Use this only when a contact tool
     needs an explicit addressBookId.
@@ -1447,15 +1473,17 @@ async def search_contacts(
     limit: int | None = None,
     addressBookId: str | None = None,
 ) -> ToolResult:
-    """Search the user's address book.
+    """Search the user's iCloud address book, the one in Contacts.app.
 
     Returns contacts with everything on the card: name, email addresses, phone
     numbers, postal addresses, organization, job title, birthday, notes and
     URLs. Preferred entries come first, so emails[0] is the address to use
     unless the user says otherwise.
 
-    Use this to turn a name into an email address before create_event, or into
-    a phone number or postal address.
+    Use this whenever a tool needs an address rather than a name: an email
+    address for create_event, a phone number to find or start a text
+    conversation, a postal address for a letter. It runs backwards too --
+    search an unfamiliar number or address to find out whose it is.
 
     Args:
         query: Text to match against names, email addresses, phone numbers,
@@ -1528,7 +1556,7 @@ async def create_contact(
     notes: str | None = None,
     addressBookId: str | None = None,
 ) -> ToolResult:
-    """Create a new contact in the address book. Returns the new contact's id.
+    """Create a contact in the user's iCloud address book. Returns its id.
 
     Args:
         name: Full name of the contact.
@@ -1605,7 +1633,7 @@ async def update_contact(
     birthday: str | None = None,
     notes: str | None = None,
 ) -> ToolResult:
-    """Update fields on an existing contact.
+    """Update fields on a contact in the user's iCloud address book.
 
     Scalar fields (name, organization, notes, birthday) replace. Emails and
     phones use add/remove deltas so a partial edit does not drop existing
@@ -1688,7 +1716,7 @@ async def update_contact(
 
 @mcp.tool
 async def delete_contact(id: str) -> ToolResult:
-    """Delete a contact from the address book.
+    """Delete a contact from the user's iCloud address book.
 
     Args:
         id: The contact ID to delete, as returned by search_contacts.
