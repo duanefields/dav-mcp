@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The audit is the reason for a schedule: an advisory published today applies
+  # to a lockfile that has not changed in months, so it has to run on a clock
+  # rather than only when someone pushes.
+  schedule:
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every combination reports, rather than the first failure hiding the
+      # others. A macOS-only break is exactly what this matrix exists to find.
+      fail-fast: false
+      matrix:
+        # macOS is the deployment target; Linux is here because a failure that
+        # shows up on only one of them is a platform assumption worth knowing
+        # about. 3.13 is included ahead of running on it.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # uv fetches the interpreter itself, so there is no setup-python step.
+      - name: Install
+        run: uv sync --extra test --python ${{ matrix.python }}
+
+      # The suite is entirely offline: nothing in tests/ opens a socket and no
+      # test touches a real iCloud account, so there are no secrets to inject
+      # and a fork's pull request runs it in full.
+      - name: Test
+        run: uv run --python ${{ matrix.python }} pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # Pinned: ruff adds rules in minor releases, and an unpinned linter turns
+      # main red on a morning when nobody changed anything. Bump deliberately.
+      # The rule set lives in pyproject, so this is the same check locally.
+      - name: Ruff
+        run: uvx ruff@0.16.4 check src tests
+
+  audit:
+    name: audit dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # Audits the locked tree, not the loosest version the constraints allow,
+      # so this reports what would actually be installed on the host.
+      - name: Export the locked dependencies
+        run: uv export --format requirements-txt --no-hashes --no-emit-project > requirements.txt
+
+      # Deliberately not pinned, unlike ruff: its findings come from a remote
+      # advisory database, and an old client is the one thing that would make
+      # this pass while missing something.
+      - name: pip-audit
+        run: uvx pip-audit -r requirements.txt --progress-spinner off

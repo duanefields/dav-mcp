@@ -1,5 +1,7 @@
 # dav-mcp
 
+[![CI](https://github.com/duanefields/dav-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/duanefields/dav-mcp/actions/workflows/ci.yml)
+
 An MCP server for Apple iCloud **Calendar and Contacts**, over CalDAV and
 CardDAV. One Apple ID, one app-specific password, one endpoint.
 

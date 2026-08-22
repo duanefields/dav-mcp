@@ -31,6 +31,31 @@ uv run pytest -k "recurrence"
 The suite is entirely offline. Nothing in `tests/` opens a socket, and no test
 touches a real iCloud account.
 
+### Linting
+
+```bash
+uvx ruff@0.16.4 check src tests
+```
+
+The rule set is narrow on purpose (`E9`, `F`, `B` — see `[tool.ruff.lint]` in
+`pyproject.toml`): bugs, not style. It is not decorative — it is what caught
+`caldav.default_calendar` using `os` while the import sat inside
+`client_from_env`, which made every unqualified `create_event` raise
+`NameError`. Adding style rules would mean reformatting files unrelated to
+whatever you are changing, so don't, unless asked for a sweep.
+
+Pin the version here and in `.github/workflows/ci.yml` together; ruff adds
+rules in minor releases and an unpinned linter turns `main` red on a morning
+nobody touched anything.
+
+### CI
+
+`.github/workflows/ci.yml` runs on push to `main`, on every pull request, and
+weekly. Three jobs: `test` (macOS and Linux × Python 3.12 and 3.13), `lint`,
+and `audit` (`pip-audit` over the exported lockfile). The schedule exists for
+`audit` — an advisory published today applies to a lockfile that has not
+changed in months, so it has to run on a clock rather than only on a push.
+
 ## Architecture Overview
 
 An MCP server that bridges a model to Apple iCloud Calendar over CalDAV. Layered

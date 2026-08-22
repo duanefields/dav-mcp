@@ -47,3 +47,27 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Deliberately narrow: rules that catch bugs, not rules that have opinions.
+#
+# E9 is syntax and IO errors, F is pyflakes -- undefined names, unused imports,
+# f-strings with no placeholders -- and B is bugbear's real footguns (mutable
+# default arguments, `except` ordering, loop variables captured by closures).
+#
+# Style rules are left off on purpose. Enabling them would mean reformatting
+# files that have nothing to do with the change in front of you, and a linter
+# that reports 24 things nobody intends to fix is a linter people stop reading.
+#
+# This set is not free of value: it is what caught `os` being used in
+# `caldav.default_calendar` while only ever imported inside `client_from_env`,
+# which made every unqualified `create_event` raise NameError.
+select = ["E9", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Setting FastMCP's env vars has to happen before the import that reads them.
+"src/dav_mcp/__init__.py" = ["E402"]

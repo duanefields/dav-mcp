@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -390,8 +391,6 @@ def _parse_multistatus(xml: str, calendar: Calendar) -> list[Resource]:
 
 def client_from_env() -> CalDavClient:
     """Build the CalDAV client from the environment."""
-    import os
-
     apple_id, password = credentials_from_env()
     return CalDavClient(
         username=apple_id,
