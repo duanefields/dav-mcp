@@ -98,9 +98,18 @@ def parse_when(value: str | None, *, default: datetime, tz: ZoneInfo) -> datetim
     if match:
         n = int(match.group("n"))
         unit = match.group("unit").rstrip("s")
-        days = n * _UNIT_DAYS[unit]
-        delta = timedelta(days=days)
-        return now - delta if match.group("dir") == "ago" else now + delta
+        # The count is unbounded in the pattern, and both the timedelta and the
+        # addition below overflow long before a model runs out of digits.
+        # OverflowError is not a ValueError, so without this it escapes the
+        # tool's `except DateError` and reaches the caller as an opaque crash.
+        try:
+            delta = timedelta(days=n * _UNIT_DAYS[unit])
+            return now - delta if match.group("dir") == "ago" else now + delta
+        except OverflowError:
+            raise DateError(
+                f"The date {value!r} is too far from now to represent. Use "
+                "something within a few thousand years."
+            ) from None
 
     try:
         parsed = datetime.fromisoformat(value.strip())

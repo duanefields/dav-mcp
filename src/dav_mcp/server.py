@@ -7,6 +7,8 @@ exists inside claude.ai, and has no meaning in a generic MCP client.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -80,8 +82,27 @@ def contacts() -> carddav.CardDavClient:
     return _contacts
 
 
-def _record_write(action: str, ok: bool, error: str | None = None) -> None:
-    _last_write.update({"at": time.time(), "ok": ok, "error": error, "action": action})
+def _record_write(action: str, ok: bool, exc: Exception | None = None) -> None:
+    """Note the outcome of the last write, for ``/health`` to report.
+
+    Takes the exception rather than a message, and keeps only its class name.
+    ``/health`` is unauthenticated, and a ``DavError``'s message carries the
+    request URL -- which names the account's principal, the calendar and the
+    resource -- plus up to 400 characters of the server's response body.
+    ``healthcheck.sh`` then forwards it off the host to a ping service.
+
+    The class name is what an operator actually needs: ``AuthError`` means the
+    app-specific password was revoked, ``Throttled`` means wait, ``Conflict``
+    means something else edited the resource. None of them leak anything.
+    """
+    _last_write.update(
+        {
+            "at": time.time(),
+            "ok": ok,
+            "error": type(exc).__name__ if exc is not None else None,
+            "action": action,
+        }
+    )
 
 
 # ----------------------------------------------------------------------
@@ -870,7 +891,7 @@ async def create_event(
     try:
         await client().put(target, name, body, create=True)
     except CalDavError as exc:
-        _record_write("create_event", False, str(exc))
+        _record_write("create_event", False, exc)
         return _error_result(f"Could not create the event: {exc}")
 
     _record_write("create_event", True)
@@ -1094,7 +1115,7 @@ async def update_event(
         body = ical.build_resource(events, tzids)
         await client().put(target, resource_name, body, etag=resource.etag)
     except (CalDavError, ical.ICalError) as exc:
-        _record_write("update_event", False, str(exc))
+        _record_write("update_event", False, exc)
         return _error_result(f"Could not update the event: {exc}")
 
     _record_write("update_event", True)
@@ -1240,7 +1261,7 @@ async def rsvp_event(id: str, status: str) -> ToolResult:
         body = ical.build_resource(events, {tz for tz in tzids if tz})
         await client().put(target, resource_name, body, etag=resource.etag)
     except (CalDavError, ical.ICalError) as exc:
-        _record_write("rsvp_event", False, str(exc))
+        _record_write("rsvp_event", False, exc)
         return _error_result(f"Could not record the reply: {exc}")
 
     _record_write("rsvp_event", True)
@@ -1289,7 +1310,7 @@ async def delete_event(id: str) -> ToolResult:
                 {"deleted": False, "reason": "not-found"},
             )
         except CalDavError as exc:
-            _record_write("delete_event", False, str(exc))
+            _record_write("delete_event", False, exc)
             return _error_result(f"Could not delete the event: {exc}")
 
         _record_write("delete_event", True)
@@ -1330,7 +1351,7 @@ async def delete_event(id: str) -> ToolResult:
         body = ical.build_resource(kept, {tz for tz in tzids if tz})
         await client().put(target, resource_name, body, etag=resource.etag)
     except (CalDavError, ical.ICalError, ValueError) as exc:
-        _record_write("delete_event", False, str(exc))
+        _record_write("delete_event", False, exc)
         return _error_result(f"Could not cancel the occurrence: {exc}")
 
     _record_write("delete_event", True)
@@ -1561,7 +1582,7 @@ async def create_contact(
     try:
         await contacts().put(book, resource, body, create=True)
     except carddav.CardDavError as exc:
-        _record_write("create_contact", False, str(exc))
+        _record_write("create_contact", False, exc)
         return _error_result(f"Could not create the contact: {exc}")
 
     _record_write("create_contact", True)
@@ -1648,7 +1669,7 @@ async def update_contact(
     try:
         await contacts().put(book, resource, parsed.serialize(), etag=card.etag)
     except carddav.CardDavError as exc:
-        _record_write("update_contact", False, str(exc))
+        _record_write("update_contact", False, exc)
         return _error_result(f"Could not update the contact: {exc}")
 
     _record_write("update_contact", True)
@@ -1693,7 +1714,7 @@ async def delete_contact(id: str) -> ToolResult:
             {"deleted": False, "reason": "not-found"},
         )
     except carddav.CardDavError as exc:
-        _record_write("delete_contact", False, str(exc))
+        _record_write("delete_contact", False, exc)
         return _error_result(f"Could not delete the contact: {exc}")
 
     _record_write("delete_contact", True)
@@ -1703,6 +1724,40 @@ async def delete_contact(id: str) -> ToolResult:
 # ----------------------------------------------------------------------
 # Health
 # ----------------------------------------------------------------------
+
+
+# /health is unauthenticated, and the hostname is public within hours of going
+# live, so anything on the internet can poll it as fast as it likes. Each miss
+# costs the full principal -> home-set -> calendars walk against iCloud, and a
+# burst trips throttling that applies to the whole Apple ID -- reads included,
+# for tens of minutes. Without a cache an outsider can turn the health endpoint
+# into an outage of every calendar tool.
+HEALTH_TTL_SECONDS = 30.0
+
+_health_cache: tuple[float, tuple[bool, int | None, str | None]] | None = None
+_health_lock = asyncio.Lock()
+
+
+async def _probe() -> tuple[bool, int | None, str | None]:
+    """Count the account's event calendars, at most once per ``HEALTH_TTL_SECONDS``.
+
+    Returns ``(reachable, calendars, error_class)``. The lock is held across the
+    request on purpose: it collapses a concurrent burst into one walk rather
+    than letting every caller that arrives before the cache fills start its own.
+    """
+    global _health_cache
+    async with _health_lock:
+        now = time.time()
+        if _health_cache and now - _health_cache[0] < HEALTH_TTL_SECONDS:
+            return _health_cache[1]
+
+        try:
+            result = (True, len(await client().calendars()), None)
+        except Exception as exc:  # the class is enough; the message may leak
+            result = (False, None, type(exc).__name__)
+
+        _health_cache = (time.time(), result)
+        return result
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -1717,16 +1772,7 @@ async def health(request):
     macOS a privacy grant is bound to the interpreter's versioned path, and an
     upgrade silently invalidates it. Watching the version predicts the breakage.
     """
-    reachable = False
-    calendars = None
-    detail = None
-
-    try:
-        found = await client().calendars()
-        reachable = True
-        calendars = len(found)
-    except Exception as exc:  # surfacing the class is enough; the text may leak
-        detail = type(exc).__name__
+    reachable, calendars, detail = await _probe()
 
     return JSONResponse(
         {
@@ -1754,6 +1800,14 @@ async def health(request):
 # ----------------------------------------------------------------------
 
 
+def _is_loopback(host: str) -> bool:
+    """Whether binding to ``host`` keeps the port on this machine."""
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return host.strip().lower() in ("localhost", "")
+
+
 def main():
     """Run the server on the transport the environment selects."""
     # Read transport settings here rather than at import time so that a service
@@ -1767,6 +1821,19 @@ def main():
         # Authentication applies to the HTTP transport only; stdio inherits its
         # security from local execution.
         mcp.auth = build_auth()
+        if mcp.auth is None and not _is_loopback(host):
+            # Not fatal: a host behind a tunnel that does its own authentication
+            # is a legitimate setup, and refusing to start would break it. But
+            # the combination otherwise hands the account's calendars and
+            # contacts -- readable and writable, with the ability to send mail
+            # as the user -- to anyone who can reach the port.
+            logger.warning(
+                "Serving on %s with DAV_MCP_AUTH unset: this port is reachable "
+                "beyond this machine and anyone who finds it can read and write "
+                "the account's calendars and contacts. Set DAV_MCP_AUTH=password "
+                "unless something in front of the server is authenticating.",
+                host,
+            )
         # Stateless: a fresh transport per request, so there is no session for a
         # client to lose. Remote clients dial from a pool of addresses, and a
         # request arriving from a different address than the one that opened the

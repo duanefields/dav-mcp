@@ -116,6 +116,9 @@ class TestAuthAttachment:
 
 
 async def health_json():
+    # The probe is cached to keep an outsider from using /health to hammer
+    # iCloud; each test wants a fresh look at its own mock.
+    server._health_cache = None
     response = await server.health(None)
     return json.loads(response.body)
 
@@ -162,7 +165,7 @@ class TestHealth:
         assert "someone@example.com" not in json.dumps(body)
 
     async def test_surfaces_the_last_failed_write(self):
-        server._record_write("create_event", False, "409 from iCloud")
+        server._record_write("create_event", False, RuntimeError("409 from iCloud"))
         try:
             with patch.object(server, "client") as factory:
                 factory.return_value.calendars = AsyncMock(return_value=[object()])
@@ -170,10 +173,77 @@ class TestHealth:
             assert body["last_write"]["ok"] is False
             assert body["last_write"]["action"] == "create_event"
             assert body["last_write"]["at"] is not None
+            # Only the class, never the message: a DavError's text carries the
+            # request URL (principal, calendar, resource) and up to 400
+            # characters of the server's response body, and healthcheck.sh
+            # forwards this field off the host to a ping service.
+            assert body["last_write"]["error"] == "RuntimeError"
+            assert "409 from iCloud" not in json.dumps(body)
         finally:
             server._last_write.update(
                 {"at": None, "ok": None, "error": None, "action": None}
             )
+
+
+class TestHealthIsCheap:
+    """/health is unauthenticated and the hostname is public within hours.
+
+    Every miss costs the full discovery walk against iCloud, and iCloud answers
+    a burst by throttling the whole Apple ID -- reads included, for tens of
+    minutes. Uncached, anything on the internet could use this endpoint to take
+    every calendar tool offline.
+    """
+
+    async def test_the_probe_is_cached_between_requests(self):
+        server._health_cache = None
+        with patch.object(server, "client") as factory:
+            calendars = AsyncMock(return_value=[object()])
+            factory.return_value.calendars = calendars
+            for _ in range(5):
+                response = await server.health(None)
+                assert json.loads(response.body)["status"] == "ok"
+        assert calendars.await_count == 1
+
+    async def test_a_stale_entry_is_refreshed(self):
+        server._health_cache = None
+        with patch.object(server, "client") as factory:
+            calendars = AsyncMock(return_value=[object()])
+            factory.return_value.calendars = calendars
+            await server.health(None)
+            stamp, cached = server._health_cache
+            server._health_cache = (stamp - server.HEALTH_TTL_SECONDS - 1, cached)
+            await server.health(None)
+        assert calendars.await_count == 2
+
+
+class TestUnauthenticatedBind:
+    async def test_warns_when_a_public_bind_has_no_auth(self, monkeypatch, caplog):
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_HOST", "0.0.0.0")
+        with patch.object(server.mcp, "run"), caplog.at_level("WARNING"):
+            server.main()
+        assert "DAV_MCP_AUTH" in caplog.text
+
+    async def test_stays_quiet_on_loopback(self, monkeypatch, caplog):
+        monkeypatch.setenv("DAV_MCP_TRANSPORT", "http")
+        monkeypatch.setenv("DAV_MCP_HOST", "127.0.0.1")
+        with patch.object(server.mcp, "run"), caplog.at_level("WARNING"):
+            server.main()
+        assert "DAV_MCP_AUTH" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "host, loopback",
+        [
+            ("127.0.0.1", True),
+            ("localhost", True),
+            ("::1", True),
+            ("0.0.0.0", False),
+            ("192.168.1.10", False),
+            ("calendar.example.com", False),
+        ],
+    )
+    def test_recognizes_loopback(self, host, loopback):
+        assert server._is_loopback(host) is loopback
 
 
 class TestScope:
@@ -195,3 +265,48 @@ class TestScope:
             password="x", base_url="https://dav.example.com", state_path=None
         )
         assert provider.required_scopes == [SCOPE]
+
+
+class TestClientRegistryIsBounded:
+    """``/register`` is unauthenticated by necessity -- a client has to register
+    before anyone can log in -- which makes it the one endpoint a stranger can
+    write to, and every call rewrites the whole state file.
+    """
+
+    def provider(self):
+        from dav_mcp.auth import PasswordOAuthProvider
+
+        return PasswordOAuthProvider(
+            password="x", base_url="https://dav.example.com", state_path=None
+        )
+
+    def registration(self, client_id):
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        return OAuthClientInformationFull(
+            client_id=client_id,
+            redirect_uris=["https://client.example.com/callback"],
+        )
+
+    async def test_a_flood_of_registrations_does_not_grow_without_bound(self):
+        from dav_mcp.auth import MAX_CLIENTS
+
+        provider = self.provider()
+        for n in range(MAX_CLIENTS + 50):
+            await provider.register_client(self.registration(f"client-{n}"))
+        assert len(provider.clients) == MAX_CLIENTS
+
+    async def test_a_client_holding_a_token_outlives_an_idle_one(self):
+        from dav_mcp.auth import MAX_CLIENTS
+
+        provider = self.provider()
+        await provider.register_client(self.registration("keeper"))
+        provider._issue_tokens("keeper", ["dav:manage"])
+
+        for n in range(MAX_CLIENTS + 10):
+            await provider.register_client(self.registration(f"drifter-{n}"))
+
+        # "keeper" registered first, so pure oldest-first would have dropped it;
+        # losing a registration costs a round trip, losing a token costs a login.
+        assert "keeper" in provider.clients
+        assert len(provider.clients) == MAX_CLIENTS

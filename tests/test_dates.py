@@ -36,6 +36,18 @@ class TestParseWhen:
         today = parse_when("today", default=None, tz=CHICAGO)
         assert parse_when("tomorrow", default=None, tz=CHICAGO) - today == timedelta(days=1)
 
+    @pytest.mark.parametrize(
+        "value",
+        ["99999999 years from now", "9" * 400 + " days ago", "999999999 weeks ago"],
+    )
+    def test_an_unrepresentable_relative_date_is_a_date_error(self, value):
+        # The count is unbounded in the pattern and both the timedelta and the
+        # addition overflow. OverflowError is not a ValueError, so before this
+        # it escaped the tools' `except DateError` and reached the caller as an
+        # opaque crash rather than something the model could act on.
+        with pytest.raises(DateError):
+            parse_when(value, default=None, tz=CHICAGO)
+
     def test_relative_expressions_go_both_directions(self):
         now = parse_when("now", default=None, tz=CHICAGO)
         ahead = parse_when("2 weeks from now", default=None, tz=CHICAGO)

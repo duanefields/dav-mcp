@@ -119,3 +119,48 @@ class TestErrorMapping:
             await client(lambda request: httpx.Response(404))._request(
                 "GET", "https://x/e.ics", expect=(200,)
             )
+
+
+class TestDiscoveryStaysInTheAccount:
+    """Discovery follows hrefs out of the response and then sends the account's
+    credentials to whatever they name. httpx strips ``Authorization`` across a
+    redirect, but an href is an ordinary new request it never sees.
+    """
+
+    def dav(self, root="https://caldav.icloud.com"):
+        return DavClient(username="me@example.com", password="pw", root=root)
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "/11026982/principal/",
+            "https://caldav.icloud.com/11026982/principal/",
+            # iCloud really does move the account to a numbered host between the
+            # principal and the home-set; rejecting this would break every
+            # account.
+            "https://p64-caldav.icloud.com/11026982/calendars/",
+        ],
+    )
+    def test_allows_the_account_s_own_hosts(self, href):
+        resolved = self.dav()._resolve("https://caldav.icloud.com/", href)
+        assert resolved.endswith(("principal/", "calendars/"))
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "https://evil.example.com/steal/",
+            "https://icloud.com.evil.example.net/steal/",
+            "http://caldav.icloud.com/downgraded/",
+        ],
+    )
+    def test_refuses_to_follow_an_href_off_the_account(self, href):
+        with pytest.raises(DavError) as excinfo:
+            self.dav()._resolve("https://caldav.icloud.com/", href)
+        assert "credentials" in str(excinfo.value)
+
+    def test_a_two_label_root_does_not_admit_its_whole_tld(self):
+        # "example.com" must not widen to everything under "com".
+        with pytest.raises(DavError):
+            self.dav(root="https://example.com")._resolve(
+                "https://example.com/", "https://evil.com/x"
+            )

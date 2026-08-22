@@ -190,7 +190,7 @@ class DavClient:
                 "The server did not return a current-user-principal. This usually "
                 "means the Apple ID or app-specific password is wrong."
             )
-        return urljoin(self._root + "/", href.text)
+        return self._resolve(self._root + "/", href.text)
 
     async def _home_set(self, principal: str, body: str, tag: str) -> str:
         """Resolve a home-set href, e.g. calendar-home-set or addressbook-home-set."""
@@ -198,7 +198,34 @@ class DavClient:
         href = tree.find(f".//{tag}/{DAV}href")
         if href is None or not href.text:
             raise DavError(f"The server did not return {tag}.")
-        return urljoin(principal, href.text)
+        return self._resolve(principal, href.text)
+
+    def _resolve(self, base: str, href: str) -> str:
+        """Join a server-supplied href against ``base``, keeping it in the account.
+
+        Discovery follows hrefs out of the response body and then sends the next
+        request -- with the account's credentials attached -- to whatever they
+        name. An absolute href pointing somewhere else would hand the Apple ID
+        and app-specific password to that host. httpx already strips
+        ``Authorization`` across a redirect; this closes the same hole for the
+        hrefs, which are ordinary new requests it cannot see.
+
+        The check is containment rather than same-origin, because iCloud
+        genuinely moves the account across hosts: the principal comes back on
+        ``caldav.icloud.com`` and the home-set on ``p64-caldav.icloud.com``.
+        Anything under the root's parent domain is therefore allowed. That is a
+        guardrail against a hostile response or a mistyped ``DAV_MCP_CALDAV_ROOT``,
+        not a defense against someone who can already forge TLS for the root --
+        they have the credentials from the first request regardless.
+        """
+        target = urljoin(base, href)
+        if not _within(self._root, target):
+            raise DavError(
+                f"The server pointed discovery at {urlparse(target).netloc or target!r}, "
+                f"which is outside {urlparse(self._root).netloc}. Refusing to send "
+                "the account credentials there."
+            )
+        return target
 
     # ------------------------------------------------------------------
     # Resource-level operations, identical for both protocols
@@ -242,6 +269,29 @@ class DavClient:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _within(root: str, target: str) -> bool:
+    """Whether ``target`` is the same host as ``root`` or a sibling under it.
+
+    Same scheme, and the host must equal the root's or sit under the root's
+    parent domain -- ``caldav.icloud.com`` admits ``p64-caldav.icloud.com``
+    but not ``icloud.com.example.net``.
+    """
+    base, other = urlparse(root), urlparse(target)
+    if other.scheme != base.scheme or not other.hostname or not base.hostname:
+        return False
+
+    host, root_host = other.hostname.lower(), base.hostname.lower()
+    if host == root_host:
+        return True
+
+    parent = root_host.partition(".")[2]
+    # A bare or two-label root has no parent worth widening to; "example.com"
+    # must not admit every host under "com".
+    if parent.count(".") < 1:
+        return False
+    return host == parent or host.endswith("." + parent)
 
 
 def is_writable(privileges: set[str]) -> bool:

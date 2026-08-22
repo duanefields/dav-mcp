@@ -65,6 +65,10 @@ logger = logging.getLogger(__name__)
 # this casually.
 SCOPE = "dav:manage"
 
+# A personal deployment sees one registration per client per reinstall, so this
+# is orders of magnitude above normal use and only ever bites a flood.
+MAX_CLIENTS = 100
+
 AUTH_CODE_TTL_SECONDS = 5 * 60
 ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -211,11 +215,46 @@ class PasswordOAuthProvider(OAuthProvider):
         if client_info.client_id is None:
             raise ValueError("client_id is required for client registration")
         self.clients[client_info.client_id] = client_info
+        self._evict_clients()
         self._save_state()
         logger.info(
             "Registered OAuth client %s (%s)",
             client_info.client_id,
             client_info.client_name or "unnamed",
+        )
+
+    def _evict_clients(self) -> None:
+        """Keep the client table bounded, dropping unused registrations first.
+
+        Registration is the one endpoint a stranger can write to -- it has to be
+        unauthenticated, since a client must register before anyone can log in --
+        and every call rewrites the whole state file. Unbounded, a script pointed
+        at ``/register`` fills the disk and makes each registration a rewrite of
+        everything before it.
+
+        A dropped registration costs its client one round trip: it registers
+        again on the next connection. A dropped *token* costs a login, so
+        clients holding one are evicted last.
+        """
+        excess = len(self.clients) - MAX_CLIENTS
+        if excess <= 0:
+            return
+
+        holding_tokens = {t.client_id for t in self.access_tokens.values()}
+        holding_tokens |= {t.client_id for t in self.refresh_tokens.values()}
+
+        # Insertion order is registration order, so this takes the oldest.
+        doomed = [cid for cid in self.clients if cid not in holding_tokens][:excess]
+        if len(doomed) < excess:
+            rest = [cid for cid in self.clients if cid not in doomed]
+            doomed += rest[: excess - len(doomed)]
+
+        for client_id in doomed:
+            del self.clients[client_id]
+        logger.warning(
+            "Registered clients exceeded %d; dropped the %d oldest.",
+            MAX_CLIENTS,
+            len(doomed),
         )
 
     # ------------------------------------------------------------------
