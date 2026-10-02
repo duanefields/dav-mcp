@@ -415,13 +415,18 @@ async def list_calendars() -> ToolResult:
     if not calendars:
         return _error_result("The account has no event calendars.")
 
-    default = next((cal for cal in calendars if not cal.read_only), None)
+    # Ask the same code create_event writes through, so the flag honors
+    # DAV_MCP_DEFAULT_CALENDAR instead of guessing from server ordering.
+    try:
+        default_id = (await client().default_calendar()).id
+    except CalDavError:
+        default_id = None
     items = [
         {
             "id": cal.id,
             "name": cal.name,
             "color": cal.color,
-            "isDefault": cal is default,
+            "isDefault": cal.id == default_id,
             "readOnly": cal.read_only,
         }
         for cal in calendars

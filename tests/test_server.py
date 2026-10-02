@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from dav_mcp import ids, server
-from dav_mcp.caldav import AuthError, Calendar, NotFound, Resource
+from dav_mcp.caldav import AuthError, CalDavError, Calendar, NotFound, Resource
 
 PERSONAL = Calendar(
     id="CAL-PERSONAL",
@@ -94,6 +94,27 @@ class TestListCalendars:
         assert items[0]["readOnly"] is True
         assert items[0]["isDefault"] is False
         assert items[1]["isDefault"] is True
+
+    async def test_flags_the_calendar_create_event_writes_to(self, caldav):
+        # A newly added calendar listed first must not steal the flag from
+        # the configured default; the model picks a write target from it.
+        work = Calendar(
+            id="CAL-WORK",
+            name="Work",
+            color="#0088FF",
+            url="https://example.invalid/cal/CAL-WORK/",
+            components=("VEVENT",),
+            read_only=False,
+        )
+        caldav.calendars.return_value = [work, PERSONAL]
+        items = (await server.list_calendars()).structured_content["items"]
+        assert [item["isDefault"] for item in items] == [False, True]
+
+    async def test_still_lists_when_no_default_resolves(self, caldav):
+        caldav.calendars.return_value = [READ_ONLY]
+        caldav.default_calendar.side_effect = CalDavError("no writable calendar")
+        items = (await server.list_calendars()).structured_content["items"]
+        assert items[0]["isDefault"] is False
 
     async def test_bad_credentials_are_reported_with_what_to_fix(self, caldav):
         caldav.calendars.side_effect = AuthError("app-specific password required")
