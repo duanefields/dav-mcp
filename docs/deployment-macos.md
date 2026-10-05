@@ -162,37 +162,33 @@ authorize once.
 
 ## Monitoring
 
-`scripts/healthcheck.sh` polls `/health` and reports to a dead-man's-switch.
-Configure it in `~/.dav-mcp/check.env`:
+`/health` makes the call itself, so any HTTP uptime monitor can watch it with no
+script on the host: point it at the public URL, e.g.
+`https://calendar.example.com/health`, and treat anything but a 2xx as down.
+Uptime Kuma's plain **HTTP(s)** monitor type is enough.
 
-```bash
-HEALTH_URL=http://127.0.0.1:18790/health
-PING_URL=https://hc-ping.com/your-uuid-here
-```
+It answers 200 with `"status": "ok"`, or 503 with `status` naming every problem
+it found, comma-separated:
 
-```cron
-*/10 * * * * /Users/you/Code/dav-mcp/scripts/healthcheck.sh >> /Users/you/.dav-mcp/check.log 2>&1
-```
+- **`iCloud unreachable (AuthError)`**, or another exception class name. This is
+  the check that matters here: an app-specific password can be revoked from
+  appleid.apple.com without anything local changing, and every tool call starts
+  failing while the process stays perfectly healthy. `Throttled` means iCloud is
+  rate limiting the account and will clear on its own.
+- **`no event calendars`**. Connected, but the account returned nothing to work
+  with.
+- **`last write failed`**. A calendar that has silently stopped accepting writes
+  is visible without waiting for someone to notice. Cleared by the next
+  successful write or a restart; `last_write.error` has the class name.
 
-`chmod 600` the config: the ping URL is a capability, not just an address. If the host runs more than one such
-service, give each its **own** healthchecks.io UUID, or one service's silence
-will be masked by the other's pings.
+A monitor alert only says 503; `curl` the endpoint for the reason. No response at
+all means the server is down or wedged, so give the monitor a timeout.
 
-It reports failure on three things:
+The iCloud probe is cached for 30 seconds, so polling more often than that only
+re-reads the cached result.
 
-- **No response.** The server is down or wedged.
-- **`status: degraded`.** iCloud could not be reached, or the account returned no
-  event calendars — which is what a revoked app-specific password looks like.
-  This is the check that matters here: an app-specific password can be revoked
-  from appleid.apple.com without anything local changing, and every tool call
-  starts failing while the process stays perfectly healthy.
-- **The last write failed.** `/health` carries the outcome of the most recent
-  write, so a calendar that has silently stopped accepting them is visible
-  without waiting for someone to notice.
-
-An outward ping is what makes the whole machine being gone detectable. A monitor
-running on the same host cannot report its own host's death. Set the expected
-period to match the cron interval, with a grace of two or three intervals.
+A monitor running on the same host cannot report its own host's death. Cover
+that separately, with something off the machine.
 
 ## Deploying by pushing
 

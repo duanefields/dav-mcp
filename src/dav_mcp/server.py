@@ -113,7 +113,7 @@ def _record_write(action: str, ok: bool, exc: Exception | None = None) -> None:
     ``/health`` is unauthenticated, and a ``DavError``'s message carries the
     request URL -- which names the account's principal, the calendar and the
     resource -- plus up to 400 characters of the server's response body.
-    ``healthcheck.sh`` then forwards it off the host to a ping service.
+    Anyone who polls the endpoint would read it.
 
     The class name is what an operator actually needs: ``AuthError`` means the
     app-specific password was revoked, ``Throttled`` means wait, ``Conflict``
@@ -1801,15 +1801,32 @@ async def health(request):
     names. A tunnel hostname shows up in certificate transparency logs within
     hours and gets scanned, so this endpoint is effectively public.
 
+    The verdict is made here, so the monitor only has to read the status code:
+    200 with ``status`` "ok", or 503 with ``status`` naming every problem found,
+    comma-separated. The other fields are there for whoever curls it next.
+
     ``python_version`` is here for the same reason things-mcp publishes it: on
     macOS a privacy grant is bound to the interpreter's versioned path, and an
     upgrade silently invalidates it. Watching the version predicts the breakage.
     """
     reachable, calendars, detail = await _probe()
 
+    problems = []
+    # The failure with no local symptom: an app-specific password revoked at
+    # appleid.apple.com. The process stays healthy and every tool call fails.
+    if not reachable:
+        problems.append(f"iCloud unreachable ({detail})")
+    elif not calendars:
+        problems.append("no event calendars")
+    # A calendar that has quietly stopped accepting writes is otherwise
+    # invisible until somebody adds an event and reads the reply carefully.
+    # Only False is a fault; None means nothing has been written since start.
+    if _last_write["ok"] is False:
+        problems.append("last write failed")
+
     return JSONResponse(
         {
-            "status": "ok" if reachable and calendars else "degraded",
+            "status": ", ".join(problems) or "ok",
             "caldav_reachable": reachable,
             "event_calendars": calendars,
             "error": detail,
@@ -1824,7 +1841,8 @@ async def health(request):
                 "action": _last_write["action"],
                 "error": _last_write["error"],
             },
-        }
+        },
+        status_code=503 if problems else 200,
     )
 
 

@@ -115,36 +115,45 @@ class TestAuthAttachment:
         assert "DAV_MCP_PASSWORD" in str(excinfo.value)
 
 
-async def health_json():
+async def health_response():
     # The probe is cached to keep an outsider from using /health to hammer
     # iCloud; each test wants a fresh look at its own mock.
     server._health_cache = None
     response = await server.health(None)
-    return json.loads(response.body)
+    return response.status_code, json.loads(response.body)
+
+
+async def health_json():
+    return (await health_response())[1]
 
 
 class TestHealth:
     async def test_reports_ok_when_the_account_is_reachable(self):
         with patch.object(server, "client") as factory:
             factory.return_value.calendars = AsyncMock(return_value=[object(), object()])
-            body = await health_json()
+            code, body = await health_response()
+        assert code == 200
         assert body["status"] == "ok"
         assert body["caldav_reachable"] is True
         assert body["event_calendars"] == 2
 
-    async def test_reports_degraded_when_caldav_cannot_be_reached(self):
+    async def test_fails_naming_the_error_when_caldav_cannot_be_reached(self):
+        # The monitor only reads the status code, so a problem has to be a 503;
+        # the reason is in status for whoever curls it.
         with patch.object(server, "client") as factory:
             factory.return_value.calendars = AsyncMock(side_effect=OSError("boom"))
-            body = await health_json()
-        assert body["status"] == "degraded"
+            code, body = await health_response()
+        assert code == 503
+        assert body["status"] == "iCloud unreachable (OSError)"
         assert body["caldav_reachable"] is False
         assert body["error"] == "OSError"
 
-    async def test_an_account_with_no_calendars_is_degraded_not_ok(self):
+    async def test_an_account_with_no_calendars_fails(self):
         with patch.object(server, "client") as factory:
             factory.return_value.calendars = AsyncMock(return_value=[])
-            body = await health_json()
-        assert body["status"] == "degraded"
+            code, body = await health_response()
+        assert code == 503
+        assert body["status"] == "no event calendars"
 
     async def test_publishes_the_python_version_for_the_privacy_grant_warning(self):
         # A macOS privacy grant is bound to the interpreter's versioned path; an
@@ -169,16 +178,32 @@ class TestHealth:
         try:
             with patch.object(server, "client") as factory:
                 factory.return_value.calendars = AsyncMock(return_value=[object()])
-                body = await health_json()
+                code, body = await health_response()
+            assert code == 503
+            assert body["status"] == "last write failed"
             assert body["last_write"]["ok"] is False
             assert body["last_write"]["action"] == "create_event"
             assert body["last_write"]["at"] is not None
             # Only the class, never the message: a DavError's text carries the
             # request URL (principal, calendar, resource) and up to 400
-            # characters of the server's response body, and healthcheck.sh
-            # forwards this field off the host to a ping service.
+            # characters of the server's response body, and this endpoint
+            # answers anyone who asks.
             assert body["last_write"]["error"] == "RuntimeError"
             assert "409 from iCloud" not in json.dumps(body)
+        finally:
+            server._last_write.update(
+                {"at": None, "ok": None, "error": None, "action": None}
+            )
+
+
+    async def test_lists_every_problem(self):
+        server._record_write("create_event", False, RuntimeError("409 from iCloud"))
+        try:
+            with patch.object(server, "client") as factory:
+                factory.return_value.calendars = AsyncMock(side_effect=OSError("boom"))
+                code, body = await health_response()
+            assert code == 503
+            assert body["status"] == "iCloud unreachable (OSError), last write failed"
         finally:
             server._last_write.update(
                 {"at": None, "ok": None, "error": None, "action": None}
