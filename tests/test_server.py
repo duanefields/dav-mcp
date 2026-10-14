@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dav_mcp import ids, server
+from dav_mcp import ical, ids, server
 from dav_mcp.caldav import AuthError, CalDavError, Calendar, NotFound, Resource
 
 PERSONAL = Calendar(
@@ -314,6 +314,65 @@ class TestUpdateEvent:
             id=ids.encode(PERSONAL.id, "u1.ics", "20260902T143000Z"), title="x"
         )
         assert "not recurring" in text_of(result)
+
+
+class TestBusyOrFree:
+    async def test_an_event_can_be_created_as_free(self, caldav):
+        result = await server.create_event(
+            title="Mom's birthday", start="2026-09-10", isAllDay=True, blocksTime=False
+        )
+        assert "TRANSP:TRANSPARENT" in caldav.put.await_args.args[2]
+        assert result.structured_content["event"]["blocksTime"] is False
+        assert "Shows as: free" in text_of(result)
+
+    async def test_an_event_can_be_created_as_explicitly_busy(self, caldav):
+        await server.create_event(
+            title="Offsite", start="2026-09-10", isAllDay=True, blocksTime=True
+        )
+        assert "TRANSP:OPAQUE" in caldav.put.await_args.args[2]
+
+    async def test_omitting_it_writes_no_preference(self, caldav):
+        await server.create_event(title="Dentist", start="2026-09-03T10:00:00")
+        assert "TRANSP" not in caldav.put.await_args.args[2]
+
+    async def test_an_update_replaces_the_existing_setting(self, caldav):
+        ics = event_ics("u1", "Trip").replace(
+            "END:VEVENT", "TRANSP:OPAQUE\r\nEND:VEVENT"
+        )
+        caldav.get = AsyncMock(
+            return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics)
+        )
+        result = await server.update_event(
+            id=ids.encode(PERSONAL.id, "u1.ics"), blocksTime=False
+        )
+        body = caldav.put.await_args.args[2]
+        assert body.count("TRANSP:") == 1
+        assert "TRANSP:TRANSPARENT" in body
+        assert result.structured_content["event"]["blocksTime"] is False
+
+    async def test_an_update_that_omits_it_leaves_it_alone(self, caldav):
+        ics = event_ics("u1", "Trip").replace(
+            "END:VEVENT", "TRANSP:TRANSPARENT\r\nEND:VEVENT"
+        )
+        caldav.get = AsyncMock(
+            return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics)
+        )
+        await server.update_event(id=ids.encode(PERSONAL.id, "u1.ics"), title="Trip v2")
+        assert "TRANSP:TRANSPARENT" in caldav.put.await_args.args[2]
+
+    async def test_one_occurrence_can_be_freed_without_freeing_the_series(self, caldav):
+        ics = event_ics("u1", "Standup").replace(
+            "END:VEVENT", "RRULE:FREQ=DAILY\r\nEND:VEVENT"
+        )
+        caldav.get = AsyncMock(
+            return_value=Resource(PERSONAL.id, "u1.ics", "url", '"e"', ics)
+        )
+        await server.update_event(
+            id=ids.encode(PERSONAL.id, "u1.ics", "20260904T100000"), blocksTime=False
+        )
+        master, override = ical.parse_resource(caldav.put.await_args.args[2])
+        assert "TRANSP" not in master
+        assert str(override["TRANSP"]) == "TRANSPARENT"
 
 
 class TestDeleteEvent:

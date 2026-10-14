@@ -200,6 +200,9 @@ def format_event(event: dict[str, Any]) -> str:
     elif event.get("recurrenceId"):
         lines.append("Repeats: one occurrence of a recurring event")
 
+    if event.get("blocksTime") is False:
+        lines.append("Shows as: free")
+
     participants = event.get("participants") or []
     if participants:
         rendered = ", ".join(
@@ -779,6 +782,7 @@ async def create_event(
     location: str | None = None,
     timeZone: str | None = None,
     color: str | None = None,
+    blocksTime: bool | None = None,
     recurrence: dict | None = None,
     participants: list | None = None,
     organizer: Annotated[
@@ -817,6 +821,11 @@ async def create_event(
         timeZone: IANA time zone (e.g. "America/New_York"). Defaults to the
             server's zone. Ignored for all-day events, which have no time zone.
         color: Display color, as a six-digit hex value (e.g. "#ff0000").
+        blocksTime: Whether the event shows as busy (true) or free (false) when
+            anyone checks the user's availability. Pass false for something
+            that sits on the calendar without occupying the person -- a
+            birthday, a holiday, a reminder, someone else's trip. Omit it to
+            write no preference, which calendars read as busy.
         recurrence: Make this a recurring event. Properties: frequency
             (required, one of "daily", "weekly", "monthly", "yearly"), interval
             (repeat every N, default 1), byDay (array of day codes for weekly:
@@ -904,6 +913,8 @@ async def create_event(
             color=(color or "").strip(),
             recurrence=recurrence,
         )
+        if blocksTime is not None:
+            ical.set_field(event, "TRANSP", _transp(blocksTime))
         if people:
             # The organizer is also an attendee, and has by definition accepted;
             # without this they do not appear on their own guest list.
@@ -964,6 +975,7 @@ async def update_event(
     timeZone: str | None = None,
     isAllDay: bool | None = None,
     color: str | None = None,
+    blocksTime: bool | None = None,
     recurrence: dict | None = None,
     addParticipants: list | None = None,
     removeParticipants: list | None = None,
@@ -997,6 +1009,9 @@ async def update_event(
             floating) event, or false to convert one back into a timed event.
         color: Six-digit hex color. Pass an empty string to clear it and inherit
             from the calendar.
+        blocksTime: Set false to make the event show as free, true to make it
+            show as busy. search_events reports the current setting as
+            blocksTime. With an occurrence id, only that occurrence changes.
         recurrence: Recurrence rules, same shape as create_event's recurrence.
             Only meaningful on a series master.
         addParticipants: Invitees to add, e.g. [{"name": "Jo", "email":
@@ -1080,6 +1095,8 @@ async def update_event(
         ical.set_field(event, "LOCATION", location.strip())
     if color is not None:
         ical.set_field(event, "COLOR", color.strip())
+    if blocksTime is not None:
+        ical.set_field(event, "TRANSP", _transp(blocksTime))
 
     invited: list[str] = []
     uninvited: list[str] = []
@@ -1180,6 +1197,11 @@ async def update_event(
             "undelivered": failed,
         },
     )
+
+
+def _transp(blocks_time: bool) -> str:
+    """The TRANSP value for busy (OPAQUE) or free (TRANSPARENT)."""
+    return "OPAQUE" if blocks_time else "TRANSPARENT"
 
 
 def _select_occurrence(
